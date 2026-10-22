@@ -110,6 +110,8 @@ import org.mozilla.geckoview.WebNotificationDelegate;
 import org.mozilla.geckoview.WebRequest;
 import org.mozilla.geckoview.WebRequestError;
 import org.mozilla.geckoview.WebResponse;
+import org.mozilla.geckoview_example.jsbridge.JsBridge;
+import org.mozilla.geckoview_example.jsbridge.ScreenCaptureManager;
 import org.mozilla.geckoview_example.utils.EdgeToEdgeUtils;
 import org.mozilla.geckoview_example.utils.WindowUtils;
 
@@ -470,6 +472,13 @@ public class GeckoViewActivity extends AppCompatActivity
   private static final int REQUEST_NOTIFICATIONS = 4;
 
   private static GeckoRuntime sGeckoRuntime;
+
+  @Nullable private JsBridge mJsBridge;
+
+  /** @return the shared GeckoRuntime instance (created lazily in onCreate). */
+  public static GeckoRuntime getGeckoRuntime() {
+    return sGeckoRuntime;
+  }
 
   private static WebExtensionManager sExtensionManager;
 
@@ -1085,6 +1094,10 @@ public class GeckoViewActivity extends AppCompatActivity
             return result;
           });
     }
+
+    // Native bridge: install the bridge WebExtension and attach the port delegate.
+    mJsBridge = new JsBridge(this);
+    mJsBridge.install(this);
 
     sExtensionManager.setExtensionDelegate(this);
 
@@ -2007,6 +2020,10 @@ public class GeckoViewActivity extends AppCompatActivity
 
   @Override
   public void onDestroy() {
+    if (mJsBridge != null) {
+      mJsBridge.onDestroy();
+      mJsBridge = null;
+    }
     if (mKillProcessOnDestroy) {
       android.os.Process.killProcess(android.os.Process.myPid());
     }
@@ -2071,7 +2088,9 @@ public class GeckoViewActivity extends AppCompatActivity
 
   @Override
   protected void onActivityResult(final int requestCode, final int resultCode, final Intent data) {
-    if (requestCode == REQUEST_FILE_PICKER) {
+    if (mJsBridge != null && requestCode == ScreenCaptureManager.REQ_PROJECTION) {
+      mJsBridge.onActivityResult(requestCode, resultCode, data);
+    } else if (requestCode == REQUEST_FILE_PICKER) {
       final BasicGeckoViewPrompt prompt =
           (BasicGeckoViewPrompt) mTabSessionManager.getCurrentSession().getPromptDelegate();
       prompt.onFileCallbackResult(resultCode, data);
@@ -2091,7 +2110,9 @@ public class GeckoViewActivity extends AppCompatActivity
   @Override
   public void onRequestPermissionsResult(
       final int requestCode, final String[] permissions, final int[] grantResults) {
-    if (requestCode == REQUEST_PERMISSIONS) {
+    if (requestCode == JsBridge.PERM_BLE || requestCode == JsBridge.PERM_FILE) {
+      JsBridge.onPermissionsResult(requestCode, grantResults);
+    } else if (requestCode == REQUEST_PERMISSIONS) {
       final ExamplePermissionDelegate permission =
           (ExamplePermissionDelegate)
               mTabSessionManager.getCurrentSession().getPermissionDelegate();

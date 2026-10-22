@@ -26,26 +26,39 @@
   }
   button:disabled { background: #9ca3af; }
   button.secondary { background: #6b7280; }
-  #mic-status, #loc-status, #ua {
+  input, select, textarea {
+    padding: 8px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px;
+    min-width: 0; flex: 1;
+  }
+  .status, #ua {
     font-size: 13px; padding: 8px 10px; border-radius: 8px;
-    background: #f3f4f6; word-break: break-all;
+    background: #f3f4f6; word-break: break-all; margin-top: 6px;
   }
   .ok { color: #16a34a; }
   .err { color: #dc2626; }
   #meter-wrap { height: 10px; background: #e5e7eb; border-radius: 5px; overflow: hidden; width: 100%; }
   #meter { height: 100%; width: 0%; background: #16a34a; transition: width .1s; }
+  .dev { padding: 8px; border: 1px solid #e5e7eb; border-radius: 8px; margin: 6px 0; display: flex; align-items: center; gap: 8px; }
+  .dev span { flex: 1; font-size: 13px; }
+  .svc { font-size: 12px; color: #374151; margin: 4px 0; }
+  .svc b { color: #1f2937; }
+  #thumb-img { max-width: 100%; border-radius: 8px; display: none; margin-top: 8px; }
 </style>
 </head>
 <body>
   <h1>GeckoView 壳测试页</h1>
-  <div class="sub">页面由 assets 本地加载 · 用于验证壳、内核与权限链路</div>
+  <div class="sub">页面由 assets 本地加载 · 测试壳 / 内核 / 原生桥（蓝牙·文件·录屏）</div>
 
   <div class="card">
     <h2>引擎信息</h2>
-    <div class="row">
-      <button id="btn-ua">刷新</button>
-    </div>
+    <div class="row"><button id="btn-ua">刷新</button></div>
     <div id="ua"></div>
+  </div>
+
+  <div class="card">
+    <h2>原生桥状态</h2>
+    <div class="row"><button id="btn-bridge">检查桥</button></div>
+    <div id="bridge-status" class="status">未检查</div>
   </div>
 
   <div class="card">
@@ -54,20 +67,151 @@
       <button id="btn-mic">请求麦克风</button>
       <button id="btn-mic-stop" class="secondary" disabled>停止</button>
     </div>
-    <div id="mic-status">未测试</div>
+    <div id="mic-status" class="status">未测试</div>
     <div id="meter-wrap" style="margin-top:8px;display:none"><div id="meter"></div></div>
   </div>
 
   <div class="card">
     <h2>定位测试（geolocation）</h2>
+    <div class="row"><button id="btn-loc">请求定位</button></div>
+    <div id="loc-status" class="status">未测试</div>
+  </div>
+
+  <div class="card">
+    <h2>蓝牙 · 中心设备（扫描/连接/GATT）</h2>
     <div class="row">
-      <button id="btn-loc">请求定位</button>
+      <button id="btn-ble-status">状态</button>
+      <button id="btn-ble-scan">开始扫描</button>
+      <button id="btn-ble-stopscan" class="secondary">停止扫描</button>
     </div>
-    <div id="loc-status">未测试</div>
+    <div id="ble-status" class="status">未测试</div>
+    <div id="ble-devices"></div>
+    <div id="ble-services" style="display:none">
+      <div class="row">
+        <select id="ble-char"></select>
+        <button id="btn-ble-read">读</button>
+        <button id="btn-ble-write">写</button>
+        <button id="btn-ble-sub">订阅</button>
+      </div>
+      <div class="row">
+        <input id="ble-write-value" placeholder="写入的文本（ASCII）" />
+        <button id="btn-ble-disc" class="secondary">断开</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>蓝牙 · 外设（广播/GATT Server）</h2>
+    <div class="row">
+      <input id="periph-name" value="GeckoBridge" placeholder="设备名" style="max-width:140px" />
+      <input id="periph-svc" value="0000ffe0-0000-1000-8000-00805f9b34fb" placeholder="Service UUID" />
+    </div>
+    <div class="row">
+      <input id="periph-char" value="0000ffe1-0000-1000-8000-00805f9b34fb" placeholder="Characteristic UUID" />
+      <input id="periph-value" value="" placeholder="对外提供的值（base64 或 ASCII）" />
+    </div>
+    <div class="row">
+      <button id="btn-periph-start">开始广播</button>
+      <button id="btn-periph-stop" class="secondary">停止</button>
+      <button id="btn-periph-set">更新值</button>
+    </div>
+    <div id="periph-status" class="status">未测试</div>
+  </div>
+
+  <div class="card">
+    <h2>文件写入 · 私有目录（无权限）</h2>
+    <div class="row">
+      <input id="file-name-p" value="log.txt" placeholder="文件名" style="max-width:160px" />
+      <input id="file-content-p" value="hello private" placeholder="内容" />
+    </div>
+    <div class="row">
+      <button id="btn-file-wp">写入</button>
+      <button id="btn-file-ap">追加</button>
+      <button id="btn-file-rp">读取</button>
+      <button id="btn-file-lp" class="secondary">列表</button>
+      <button id="btn-file-dp" class="secondary">删除</button>
+    </div>
+    <div id="file-status-p" class="status">未测试</div>
+  </div>
+
+  <div class="card">
+    <h2>文件写入 · 公共目录（Downloads）</h2>
+    <div class="row">
+      <input id="file-name-u" value="report.txt" placeholder="文件名" style="max-width:160px" />
+      <input id="file-content-u" value="hello public" placeholder="内容" />
+    </div>
+    <div class="row">
+      <button id="btn-file-wu">写入</button>
+      <button id="btn-file-ru">读取（最后写入）</button>
+      <button id="btn-file-du" class="secondary">删除（最后写入）</button>
+    </div>
+    <div id="file-status-u" class="status">未测试</div>
+  </div>
+
+  <div class="card">
+    <h2>录屏（MediaProjection）</h2>
+    <div class="row">
+      <button id="btn-rec-start">开始录屏</button>
+      <button id="btn-rec-stop" class="secondary" disabled>停止</button>
+      <button id="btn-rec-status" class="secondary">状态</button>
+      <button id="btn-rec-thumb" class="secondary">抽帧预览</button>
+    </div>
+    <div id="rec-status" class="status">未测试</div>
+    <img id="thumb-img" alt="录屏预览" />
   </div>
 
 <script>
   (function () {
+    "use strict";
+
+    /* ---------- Bridge client ---------- */
+    window.gvBridge = {
+      _pending: new Map(), _seq: 0, _events: {}, ready: false,
+      invoke: function (action, params) {
+        var self = this;
+        return new Promise(function (resolve, reject) {
+          if (!self.ready) { reject(new Error('桥未连接')); return; }
+          var id = 'r' + (++self._seq);
+          self._pending.set(id, { resolve: resolve, reject: reject });
+          window.dispatchEvent(new CustomEvent('gv-bridge-request', {
+            detail: { id: id, action: action, params: params || {} }
+          }));
+          setTimeout(function () {
+            var p = self._pending.get(id);
+            if (p) { self._pending.delete(id); p.reject(new Error('超时')); }
+          }, 30000);
+        });
+      },
+      on: function (event, cb) {
+        (this._events[event] = this._events[event] || []).push(cb);
+      },
+      _fire: function (event, data) {
+        (this._events[event] || []).forEach(function (cb) { cb(data); });
+      }
+    };
+    window.addEventListener('gv-bridge-response', function (e) {
+      var m = e.detail;
+      if (!m) return;
+      var p = window.gvBridge._pending.get(m.id);
+      if (p) {
+        window.gvBridge._pending.delete(m.id);
+        m.ok ? p.resolve(m.result) : p.reject(new Error(m.error));
+      }
+    });
+    window.addEventListener('gv-bridge-event', function (e) {
+      var m = e.detail;
+      if (m && m.event) window.gvBridge._fire(m.event, m.data);
+    });
+
+    function base64(s) { return btoa(unescape(encodeURIComponent(s))); }
+    function deb64(s) { try { return decodeURIComponent(escape(atob(s))); } catch (e) { return atob(s); } }
+
+    function log(el, text, cls) {
+      el.className = 'status' + (cls ? ' ' + cls : '');
+      el.textContent = text;
+    }
+
+    /* ---------- 引擎信息 ---------- */
     var uaBox = document.getElementById('ua');
     function renderUA() {
       var secure = (window.isSecureContext !== undefined) ? (window.isSecureContext ? '是' : '否') : '未知';
@@ -78,7 +222,25 @@
     document.getElementById('btn-ua').addEventListener('click', renderUA);
     renderUA();
 
-    // 麦克风
+    /* ---------- 桥状态 ---------- */
+    var bridgeStatus = document.getElementById('bridge-status');
+    document.getElementById('btn-bridge').addEventListener('click', function () {
+      bridgeStatus.className = 'status';
+      bridgeStatus.textContent = '检测中…';
+      window.gvBridge.invoke('ping', {})
+        .then(function (r) {
+          window.gvBridge.ready = true;
+          log(bridgeStatus, '桥已连接 ✓ ' + JSON.stringify(r), 'ok');
+        })
+        .catch(function (err) {
+          log(bridgeStatus, '桥未连接：' + err.message + '（需在 APK 内运行）', 'err');
+        });
+    });
+    setTimeout(function () {
+      window.gvBridge.invoke('ping', {}).then(function () { window.gvBridge.ready = true; }).catch(function () {});
+    }, 400);
+
+    /* ---------- 麦克风 ---------- */
     var stream = null, audioCtx = null, rafId = null;
     var micStatus = document.getElementById('mic-status');
     var btnMic = document.getElementById('btn-mic');
@@ -87,14 +249,13 @@
     var meter = document.getElementById('meter');
 
     btnMic.addEventListener('click', function () {
-      micStatus.className = '';
+      micStatus.className = 'status';
       micStatus.textContent = '请求中…';
       navigator.mediaDevices.getUserMedia({ audio: true })
         .then(function (s) {
           stream = s;
-          micStatus.className = 'ok';
-          micStatus.textContent = '已授权。轨道数：' + s.getAudioTracks().length +
-            '，采样率：' + (s.getAudioTracks()[0].getSettings().sampleRate || '未知');
+          log(micStatus, '已授权。轨道数：' + s.getAudioTracks().length +
+            '，采样率：' + (s.getAudioTracks()[0].getSettings().sampleRate || '未知'), 'ok');
           btnMic.disabled = true;
           btnStop.disabled = false;
           meterWrap.style.display = 'block';
@@ -119,9 +280,8 @@
           }
         })
         .catch(function (err) {
-          micStatus.className = 'err';
-          micStatus.textContent = '被拒绝或失败：' + (err && err.name ? err.name : err) +
-            ' · ' + (err && err.message ? err.message : '');
+          log(micStatus, '被拒绝或失败：' + (err && err.name ? err.name : err) +
+            ' · ' + (err && err.message ? err.message : ''), 'err');
         });
     });
 
@@ -131,30 +291,276 @@
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
       meter.style.width = '0%';
       meterWrap.style.display = 'none';
-      micStatus.className = '';
+      micStatus.className = 'status';
       micStatus.textContent = '已停止';
       btnMic.disabled = false;
       btnStop.disabled = true;
     });
 
-    // 定位
+    /* ---------- 定位 ---------- */
     var locStatus = document.getElementById('loc-status');
     document.getElementById('btn-loc').addEventListener('click', function () {
-      locStatus.className = '';
+      locStatus.className = 'status';
       locStatus.textContent = '请求中…';
       navigator.geolocation.getCurrentPosition(
         function (pos) {
-          locStatus.className = 'ok';
-          locStatus.textContent = '纬度 ' + pos.coords.latitude.toFixed(4) +
+          log(locStatus, '纬度 ' + pos.coords.latitude.toFixed(4) +
             '，经度 ' + pos.coords.longitude.toFixed(4) +
-            '，精度 ' + (pos.coords.accuracy || '未知') + 'm';
+            '，精度 ' + (pos.coords.accuracy || '未知') + 'm', 'ok');
         },
         function (err) {
-          locStatus.className = 'err';
-          locStatus.textContent = '失败：' + err.code + ' ' + err.message;
+          log(locStatus, '失败：' + err.code + ' ' + err.message, 'err');
         },
         { enableHighAccuracy: false, timeout: 10000, maximumAge: 0 }
       );
+    });
+
+    /* ---------- 蓝牙：中心 ---------- */
+    var bleStatus = document.getElementById('ble-status');
+    var devicesBox = document.getElementById('ble-devices');
+    var devices = {};
+    var currentDevice = null;
+
+    document.getElementById('btn-ble-status').addEventListener('click', function () {
+      window.gvBridge.invoke('ble.status', {})
+        .then(function (r) { log(bleStatus, JSON.stringify(r), 'ok'); })
+        .catch(function (e) { log(bleStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-ble-scan').addEventListener('click', function () {
+      devices = {}; devicesBox.innerHTML = '';
+      window.gvBridge.invoke('ble.startScan', {})
+        .then(function () { log(bleStatus, '扫描中… 发现设备将列在下方', 'ok'); })
+        .catch(function (e) { log(bleStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-ble-stopscan').addEventListener('click', function () {
+      window.gvBridge.invoke('ble.stopScan', {})
+        .then(function () { log(bleStatus, '已停止扫描', ''); })
+        .catch(function (e) { log(bleStatus, e.message, 'err'); });
+    });
+
+    window.gvBridge.on('ble.deviceFound', function (d) {
+      if (devices[d.address]) return;
+      devices[d.address] = d;
+      var row = document.createElement('div');
+      row.className = 'dev';
+      row.innerHTML = '<span>' + (d.name || '(未命名)') + '<br><small>' + d.address + ' · RSSI ' + d.rssi + ' dBm</small></span>';
+      var btn = document.createElement('button');
+      btn.textContent = '连接';
+      btn.addEventListener('click', function () { connectBle(d.address); });
+      row.appendChild(btn);
+      devicesBox.appendChild(row);
+    });
+
+    window.gvBridge.on('ble.connected', function (d) {
+      log(bleStatus, '已连接 ' + d.address + '，发现服务中…', 'ok');
+    });
+    window.gvBridge.on('ble.disconnected', function () {
+      log(bleStatus, '已断开', '');
+      document.getElementById('ble-services').style.display = 'none';
+    });
+    window.gvBridge.on('ble.services', function (d) {
+      var sel = document.getElementById('ble-char');
+      sel.innerHTML = '';
+      d.services.forEach(function (s) {
+        s.characteristics.forEach(function (c) {
+          var opt = document.createElement('option');
+          opt.value = s.uuid + '|' + c.uuid;
+          opt.textContent = s.uuid.slice(4, 8) + '/' + c.uuid.slice(4, 8) + ' [' + c.properties + ']';
+          sel.appendChild(opt);
+        });
+      });
+      document.getElementById('ble-services').style.display = 'block';
+      log(bleStatus, '服务发现完成，共 ' + d.services.length + ' 个服务。选择特征值后操作。', 'ok');
+    });
+
+    function connectBle(address) {
+      currentDevice = address;
+      window.gvBridge.invoke('ble.connect', { address: address })
+        .catch(function (e) { log(bleStatus, '连接失败：' + e.message, 'err'); });
+    }
+
+    document.getElementById('btn-ble-read').addEventListener('click', function () {
+      var v = document.getElementById('ble-char').value.split('|');
+      window.gvBridge.invoke('ble.read', { service: v[0], characteristic: v[1] })
+        .then(function (r) { log(bleStatus, '读取到：' + deb64(r.value) + ' (base64: ' + r.value + ')', 'ok'); })
+        .catch(function (e) { log(bleStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-ble-write').addEventListener('click', function () {
+      var v = document.getElementById('ble-char').value.split('|');
+      var text = document.getElementById('ble-write-value').value;
+      window.gvBridge.invoke('ble.write', { service: v[0], characteristic: v[1], value: base64(text) })
+        .then(function () { log(bleStatus, '写入成功：' + text, 'ok'); })
+        .catch(function (e) { log(bleStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-ble-sub').addEventListener('click', function () {
+      var v = document.getElementById('ble-char').value.split('|');
+      window.gvBridge.invoke('ble.subscribe', { service: v[0], characteristic: v[1] })
+        .then(function () { log(bleStatus, '已订阅，等待通知…', 'ok'); })
+        .catch(function (e) { log(bleStatus, e.message, 'err'); });
+    });
+
+    window.gvBridge.on('ble.characteristicChanged', function (d) {
+      log(bleStatus, '收到通知 ' + d.uuid.slice(4, 8) + '：' + deb64(d.value), 'ok');
+    });
+
+    document.getElementById('btn-ble-disc').addEventListener('click', function () {
+      window.gvBridge.invoke('ble.disconnect', {})
+        .then(function () { log(bleStatus, '已断开', ''); })
+        .catch(function (e) { log(bleStatus, e.message, 'err'); });
+    });
+
+    /* ---------- 蓝牙：外设 ---------- */
+    var periphStatus = document.getElementById('periph-status');
+    document.getElementById('btn-periph-start').addEventListener('click', function () {
+      var p = {
+        name: document.getElementById('periph-name').value,
+        serviceUuid: document.getElementById('periph-svc').value,
+        charUuid: document.getElementById('periph-char').value,
+        value: document.getElementById('periph-value').value ? base64(document.getElementById('periph-value').value) : ''
+      };
+      window.gvBridge.invoke('ble.peripheral.start', p)
+        .then(function () { log(periphStatus, '广播已启动，等待中心设备连接…', 'ok'); })
+        .catch(function (e) { log(periphStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-periph-stop').addEventListener('click', function () {
+      window.gvBridge.invoke('ble.peripheral.stop', {})
+        .then(function () { log(periphStatus, '已停止广播', ''); })
+        .catch(function (e) { log(periphStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-periph-set').addEventListener('click', function () {
+      var v = document.getElementById('periph-value').value;
+      window.gvBridge.invoke('ble.peripheral.setValue', {
+        charUuid: document.getElementById('periph-char').value,
+        value: base64(v)
+      })
+        .then(function () { log(periphStatus, '值已更新：' + v, 'ok'); })
+        .catch(function (e) { log(periphStatus, e.message, 'err'); });
+    });
+
+    window.gvBridge.on('ble.peripheral.connected', function (d) {
+      log(periphStatus, '中心设备已连接：' + d.address, 'ok');
+    });
+    window.gvBridge.on('ble.peripheral.disconnected', function () {
+      log(periphStatus, '中心设备已断开', '');
+    });
+    window.gvBridge.on('ble.peripheral.write', function (d) {
+      log(periphStatus, '中心写入：' + deb64(d.value), 'ok');
+    });
+    window.gvBridge.on('ble.peripheral.subscribed', function (d) {
+      log(periphStatus, '中心订阅通知：' + d.subscribed, 'ok');
+    });
+
+    /* ---------- 文件：私有 ---------- */
+    var fileP = document.getElementById('file-status-p');
+    document.getElementById('btn-file-wp').addEventListener('click', function () {
+      window.gvBridge.invoke('file.writePrivate', {
+        name: document.getElementById('file-name-p').value,
+        content: document.getElementById('file-content-p').value
+      }).then(function (r) { log(fileP, '已写入私有目录：' + r.path + ' (' + r.size + 'B)', 'ok'); })
+        .catch(function (e) { log(fileP, e.message, 'err'); });
+    });
+    document.getElementById('btn-file-ap').addEventListener('click', function () {
+      window.gvBridge.invoke('file.appendPrivate', {
+        name: document.getElementById('file-name-p').value,
+        content: document.getElementById('file-content-p').value + '\n'
+      }).then(function (r) { log(fileP, '已追加：' + r.path + ' (' + r.size + 'B)', 'ok'); })
+        .catch(function (e) { log(fileP, e.message, 'err'); });
+    });
+    document.getElementById('btn-file-rp').addEventListener('click', function () {
+      window.gvBridge.invoke('file.readPrivate', { name: document.getElementById('file-name-p').value })
+        .then(function (r) { log(fileP, '读取：' + r.content, 'ok'); })
+        .catch(function (e) { log(fileP, e.message, 'err'); });
+    });
+    document.getElementById('btn-file-lp').addEventListener('click', function () {
+      window.gvBridge.invoke('file.listPrivate', {})
+        .then(function (r) { log(fileP, JSON.stringify(r.files), 'ok'); })
+        .catch(function (e) { log(fileP, e.message, 'err'); });
+    });
+    document.getElementById('btn-file-dp').addEventListener('click', function () {
+      window.gvBridge.invoke('file.deletePrivate', { name: document.getElementById('file-name-p').value })
+        .then(function (r) { log(fileP, '删除结果：' + r.deleted, ''); })
+        .catch(function (e) { log(fileP, e.message, 'err'); });
+    });
+
+    /* ---------- 文件：公共 ---------- */
+    var fileU = document.getElementById('file-status-u');
+    var lastPublicUri = '';
+    document.getElementById('btn-file-wu').addEventListener('click', function () {
+      window.gvBridge.invoke('file.writePublic', {
+        name: document.getElementById('file-name-u').value,
+        content: document.getElementById('file-content-u').value,
+        mime: 'text/plain'
+      }).then(function (r) {
+        lastPublicUri = r.uri || r.path || '';
+        log(fileU, '已写入公共目录：' + (r.uri || r.path), 'ok');
+      }).catch(function (e) { log(fileU, e.message, 'err'); });
+    });
+    document.getElementById('btn-file-ru').addEventListener('click', function () {
+      if (!lastPublicUri) { log(fileU, '先写入一个公共文件', 'err'); return; }
+      window.gvBridge.invoke('file.readPublic', { uri: lastPublicUri })
+        .then(function (r) { log(fileU, '读取：' + r.content, 'ok'); })
+        .catch(function (e) { log(fileU, e.message, 'err'); });
+    });
+    document.getElementById('btn-file-du').addEventListener('click', function () {
+      if (!lastPublicUri) { log(fileU, '先写入一个公共文件', 'err'); return; }
+      window.gvBridge.invoke('file.deletePublic', { uri: lastPublicUri })
+        .then(function (r) { log(fileU, '删除结果：' + r.deleted, ''); lastPublicUri = ''; })
+        .catch(function (e) { log(fileU, e.message, 'err'); });
+    });
+
+    /* ---------- 录屏 ---------- */
+    var recStatus = document.getElementById('rec-status');
+    var thumbImg = document.getElementById('thumb-img');
+    var lastCapturePath = '';
+
+    document.getElementById('btn-rec-start').addEventListener('click', function () {
+      window.gvBridge.invoke('screen.start', {})
+        .then(function () {
+          log(recStatus, '已请求录屏授权，请在弹出的系统对话框确认…', 'ok');
+          document.getElementById('btn-rec-stop').disabled = false;
+        })
+        .catch(function (e) { log(recStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-rec-stop').addEventListener('click', function () {
+      window.gvBridge.invoke('screen.stop', {})
+        .then(function () { log(recStatus, '已发送停止指令，等待保存…', ''); })
+        .catch(function (e) { log(recStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-rec-status').addEventListener('click', function () {
+      window.gvBridge.invoke('screen.status', {})
+        .then(function (r) { log(recStatus, '录制中：' + r.recording + (r.path ? ' · ' + r.path : ''), ''); })
+        .catch(function (e) { log(recStatus, e.message, 'err'); });
+    });
+
+    document.getElementById('btn-rec-thumb').addEventListener('click', function () {
+      if (!lastCapturePath) { log(recStatus, '还没有完成的录屏文件', 'err'); return; }
+      window.gvBridge.invoke('screen.thumbnail', { path: lastCapturePath })
+        .then(function (r) {
+          thumbImg.src = 'data:image/jpeg;base64,' + r.jpegBase64;
+          thumbImg.style.display = 'block';
+          log(recStatus, '预览帧 ' + r.width + 'x' + r.height, 'ok');
+        })
+        .catch(function (e) { log(recStatus, e.message, 'err'); });
+    });
+
+    window.gvBridge.on('screen.recordingStarted', function (d) {
+      log(recStatus, '录屏中：' + d.path, 'ok');
+    });
+    window.gvBridge.on('screen.recordingStopped', function (d) {
+      lastCapturePath = d.path;
+      log(recStatus, '录屏完成：' + d.path + ' (' + (d.size / 1024 / 1024).toFixed(2) + 'MB)。可点「抽帧预览」', 'ok');
+      document.getElementById('btn-rec-stop').disabled = true;
+    });
+    window.gvBridge.on('screen.recordingError', function (d) {
+      log(recStatus, '录屏错误：' + (d && d.error), 'err');
     });
   })();
 </script>
