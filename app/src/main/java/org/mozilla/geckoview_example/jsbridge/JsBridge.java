@@ -101,7 +101,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
               mExtension = extension;
               extension.setMessageDelegate(this, NATIVE_APP);
               Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
-              toast("桥扩展已安装");
+              toast("桥扩展已安装 v1.0.4");
             },
             e -> {
               Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
