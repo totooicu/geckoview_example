@@ -101,12 +101,34 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
               mExtension = extension;
               extension.setMessageDelegate(this, NATIVE_APP);
               Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
-              toast("桥扩展已安装 v1.0.4");
+              toast("桥扩展已安装 v1.0.5");
             },
             e -> {
               Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
-              toast("桥扩展安装失败: " + e.getMessage());
+              showInstallError(e);
             });
+  }
+
+  /** 用 AlertDialog 显示完整错误（Toast 会截断长文案，无法定位）。 */
+  private void showInstallError(final Throwable e) {
+    final GeckoViewActivity a = mActivity.get();
+    if (a == null) {
+      return;
+    }
+    String detail = e.getMessage();
+    Throwable cause = e.getCause();
+    while (cause != null && detail.length() < 1500) {
+      detail = detail + "\ncaused by: " + cause.getMessage();
+      cause = cause.getCause();
+    }
+    final String text = detail;
+    mMainHandler.post(
+        () ->
+            new android.app.AlertDialog.Builder(a)
+                .setTitle("桥扩展安装失败（完整错误）")
+                .setMessage(text)
+                .setPositiveButton("知道了", null)
+                .show());
   }
 
   private void toast(final String text) {
