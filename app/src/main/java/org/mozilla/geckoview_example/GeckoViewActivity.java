@@ -481,6 +481,13 @@ public class GeckoViewActivity extends AppCompatActivity
     return sGeckoRuntime;
   }
 
+  /** 扩展安装完成后刷新当前页面，让 content script 注入（页面可能先于扩展加载完成）。 */
+  public void reloadCurrentPage() {
+    if (mTabSessionManager != null && mTabSessionManager.getCurrentSession() != null) {
+      mTabSessionManager.getCurrentSession().reload();
+    }
+  }
+
   private static WebExtensionManager sExtensionManager;
 
   private TabSessionManager mTabSessionManager;
