@@ -9,235 +9,100 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
 
 import org.json.JSONObject;
-import org.mozilla.geckoview.GeckoResult;
-import org.mozilla.geckoview.GeckoSession;
-import org.mozilla.geckoview.WebExtension;
-import org.mozilla.geckoview.WebExtensionController;
-import org.mozilla.geckoview_example.GeckoViewActivity;
 
 import java.lang.ref.WeakReference;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Bridge between the injected WebExtension content script and native Android modules.
+ * Bridge between the web page and native Android modules, injected into the
+ * WebView as the JS object {@code AndroidBridge}.
  *
- * <p>Message protocol (JSON):</p>
+ * <p>Page protocol (unchanged from the GeckoView bridge, JSON over
+ * {@code window.postMessage}):</p>
  * <ul>
- *   <li>page -&gt; native: {"id": "...", "action": "ble.startScan", "params": {...}}</li>
- *   <li>native -&gt; page (reply): {"id": "...", "ok": true, "result": {...}} or
- *       {"id": "...", "ok": false, "error": "..."}</li>
- *   <li>native -&gt; page (event): {"event": "ble.deviceFound", "data": {...}}</li>
+ *   <li>page -&gt; native: {"type":"gv-bridge-request","id":"...","action":"...","params":{...}}</li>
+ *   <li>native -&gt; page (reply): {"type":"gv-bridge-response","id":"...","ok":true,"result":{...}}</li>
+ *   <li>native -&gt; page (event): {"type":"gv-bridge-event","event":"ble.deviceFound","data":{...}}</li>
  * </ul>
+ *
+ * <p>Transport: an injected adapter script listens for the page's postMessage,
+ * calls {@link #invoke(String, String, String)} on the injected object, and the
+ * reply is delivered back through {@code window.__gvBridgeCallback(...)} which the
+ * adapter forwards to the page with postMessage. The test page needs no changes.</p>
  */
-public class JsBridge implements WebExtension.MessageDelegate, WebExtension.PortDelegate {
+public class JsBridge {
   private static final String LOGTAG = "JsBridge";
-  private static final String NATIVE_APP = "bridge";
-  private static final String EXTENSION_ID = "bridge@totooicu.local";
-  private static final String EXTENSION_URI = "resource://android/assets/webextension/";
 
   /** Permission request codes. */
   public static final int PERM_BLE = 1001;
   public static final int PERM_FILE = 1002;
 
-  private final WeakReference<GeckoViewActivity> mActivity;
+  private final WeakReference<Activity> mActivity;
   private final Handler mMainHandler = new Handler(Looper.getMainLooper());
 
-  @Nullable private WebExtension.Port mPort;
-  @Nullable private WebExtension mExtension;
-  /** onMessage (sendNativeMessage) 模式下，按请求 id 暂存待完成的 GeckoResult。 */
-  private final Map<String, GeckoResult<Object>> mPendingResults = new HashMap<>();
+  /** The WebView used to push replies/events back to the page. */
+  @Nullable private WebView mWebView;
 
   private BleManager mBle;
   private FileBridge mFiles;
   private ScreenCaptureManager mScreen;
 
-  public JsBridge(GeckoViewActivity activity) {
+  public JsBridge(Activity activity) {
     mActivity = new WeakReference<>(activity);
     mBle = new BleManager(activity, this);
     mFiles = new FileBridge(activity, this);
     mScreen = new ScreenCaptureManager(activity, this);
   }
 
-  /* ----------------------------------------------------------------------------
-   * Install & connect
-   * -------------------------------------------------------------------------- */
-
-  public void install(GeckoViewActivity activity) {
-    final WebExtensionController controller = activity.getGeckoRuntime().getWebExtensionController();
-    // ensureBuiltIn：已安装则直接返回已安装实例，未安装则安装。
-    // 避免每次启动卸载重装导致 setMessageDelegate 注册时序问题。
-    controller
-        .ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)
-        .accept(
-            extension -> {
-              mExtension = extension;
-              // 全局注册（background sender.session == null 时走这里）
-              extension.setMessageDelegate(this, NATIVE_APP);
-              // Session 级别注册（background sender.session != null 时走这里，两条路径不回退）
-              final GeckoViewActivity act = mActivity.get();
-              if (act != null) {
-                GeckoSession session = act.getCurrentSession();
-                if (session != null) {
-                  session.getWebExtensionController().setMessageDelegate(extension, this, NATIVE_APP);
-                }
-                act.reloadCurrentPage();
-              }
-              String eid = extension.id == null ? "NULL!" : extension.id;
-              Log.i(LOGTAG, "Bridge extension ensured: id=" + eid);
-              toast("桥扩展 v1.0.7 id=" + eid);
-            },
-            e -> {
-              Log.e(LOGTAG, "Bridge extension ENSURE FAILED: " + e.getMessage(), e);
-              showInstallError(e);
-            });
-  }
-
-  /** 用 AlertDialog 显示完整错误，并把全文复制到剪贴板（正文可能显示不全/过淡）。 */
-  private void showInstallError(final Throwable e) {
-    final GeckoViewActivity a = mActivity.get();
-    if (a == null) {
-      return;
-    }
-    StringBuilder sb = new StringBuilder();
-    if (e instanceof WebExtension.InstallException) {
-      WebExtension.InstallException ie = (WebExtension.InstallException) e;
-      sb.append("InstallException code=")
-          .append(ie.code)
-          .append(" id=")
-          .append(String.valueOf(ie.extensionId))
-          .append(" name=")
-          .append(String.valueOf(ie.extensionName))
-          .append(" version=")
-          .append(String.valueOf(ie.extensionVersion))
-          .append("\ntoString: ")
-          .append(String.valueOf(ie.toString()));
-    } else {
-      Throwable t = e;
-      int depth = 0;
-      while (t != null && depth < 8) {
-        if (sb.length() > 0) {
-          sb.append("\n--- caused by ---\n");
-        }
-        String msg = t.getMessage();
-        sb.append(t.getClass().getName())
-            .append(": ")
-            .append(msg == null || msg.isEmpty() ? "(no message)" : msg);
-        t = t.getCause();
-        depth++;
-      }
-      if (sb.length() == 0) {
-        sb.append("(empty error)");
-      }
-    }
-    final String text = sb.toString();
-    mMainHandler.post(
-        () -> {
-          try {
-            android.content.ClipboardManager cm =
-                (android.content.ClipboardManager)
-                    a.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
-            if (cm != null) {
-              cm.setPrimaryClip(
-                  android.content.ClipData.newPlainText("gvbridge_error", text));
-            }
-          } catch (Exception ignored) {
-          }
-          new android.app.AlertDialog.Builder(a)
-              .setTitle("桥扩展安装失败 v1.0.7（完整错误）")
-              .setMessage(text + "\n\n[错误全文已复制到剪贴板，直接粘贴即可]")
-              .setPositiveButton("知道了", null)
-              .show();
-        });
-  }
-
-  private void toast(final String text) {
-    final GeckoViewActivity a = mActivity.get();
-    if (a == null) {
-      return;
-    }
-    mMainHandler.post(() -> android.widget.Toast.makeText(a, text, android.widget.Toast.LENGTH_LONG).show());
+  /** Called by the hosting activity once the WebView exists. */
+  public void attach(WebView webView) {
+    mWebView = webView;
   }
 
   /* ----------------------------------------------------------------------------
-   * MessageDelegate: onMessage (sendNativeMessage, request-response)
+   * JS interface (injected as window.AndroidBridge)
    * -------------------------------------------------------------------------- */
 
-  @Override
-  public GeckoResult<Object> onMessage(
-      String nativeApp, Object message, WebExtension.MessageSender sender) {
-    Log.i(LOGTAG, "onMessage: " + nativeApp + " " + message);
-    toast("原生 onMessage: " + nativeApp);
-    GeckoResult<Object> result = new GeckoResult<>();
+  /** Entry point called by the injected adapter script for each page request. */
+  @JavascriptInterface
+  public void invoke(String id, String action, String paramsJson) {
+    Log.i(LOGTAG, "invoke: action=" + action + " id=" + id);
     try {
-      JSONObject json = (JSONObject) message;
-      final String id = json.optString("id", "");
-      final String action = json.optString("action", "");
-      final JSONObject params = json.optJSONObject("params");
-      if (!id.isEmpty()) {
-        mPendingResults.put(id, result);
-      }
-      dispatch(id, action, params == null ? new JSONObject() : params);
+      JSONObject params =
+          (paramsJson == null || paramsJson.isEmpty())
+              ? new JSONObject()
+              : new JSONObject(paramsJson);
+      dispatch(id, action, params);
     } catch (Exception e) {
-      Log.e(LOGTAG, "onMessage dispatch failed", e);
-      result.completeExceptionally(e);
-    }
-    return result;
-  }
-
-  /* ----------------------------------------------------------------------------
-   * MessageDelegate: onConnect (connectNative, bidirectional port)
-   * -------------------------------------------------------------------------- */
-
-  @Override
-  public void onConnect(WebExtension.Port port) {
-    Log.i(LOGTAG, "Bridge port connected");
-    mPort = port;
-    port.setDelegate(this);
-    toast("原生桥已连接");
-  }
-
-  @Override
-  public void onPortMessage(Object message, WebExtension.Port port) {
-    JSONObject json = (JSONObject) message;
-    if (json == null) {
-      return;
-    }
-    final String id = json.optString("id", "");
-    final String action = json.optString("action", "");
-    final JSONObject params = json.optJSONObject("params");
-
-    Log.i(LOGTAG, "bridge <- " + action);
-    try {
-      dispatch(id, action, params == null ? new JSONObject() : params);
-    } catch (Exception e) {
-      Log.e(LOGTAG, "dispatch failed for " + action, e);
+      Log.e(LOGTAG, "invoke dispatch failed for " + action, e);
       respond(id, false, null, "bridge: " + e.getMessage());
     }
   }
 
-  @Override
-  public void onDisconnect(WebExtension.Port port) {
-    Log.i(LOGTAG, "Bridge port disconnected");
-    if (mPort == port) {
-      mPort = null;
-    }
-    toast("原生桥已断开");
+  /** Diagnostics helper exposed to the page. */
+  @JavascriptInterface
+  public boolean isReady() {
+    return true;
   }
+
   /* ----------------------------------------------------------------------------
-   * Routing
+   * Routing (same action space as the old WebExtension bridge)
    * -------------------------------------------------------------------------- */
 
   private void dispatch(String id, String action, JSONObject params) throws Exception {
     if ("ping".equals(action)) {
       JSONObject r = new JSONObject();
       r.put("pong", true);
+      r.put("engine", "webview");
       respond(id, true, r, null);
     } else if (action.startsWith("ble.")) {
       mBle.handle(id, action, params, this);
@@ -254,12 +119,13 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
    * Reply / event helpers
    * -------------------------------------------------------------------------- */
 
-  /** Send a success reply to the page (port mode) or complete the pending GeckoResult (onMessage mode). */
+  /** Send a success reply to the page through the injected adapter callback. */
   public void respond(String id, boolean ok, @Nullable JSONObject result, @Nullable String error) {
     mMainHandler.post(
         () -> {
           try {
             JSONObject msg = new JSONObject();
+            msg.put("type", "gv-bridge-response");
             msg.put("id", id);
             msg.put("ok", ok);
             if (result != null) {
@@ -268,35 +134,25 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
             if (error != null) {
               msg.put("error", error);
             }
-            // Port mode (connectNative)
-            if (mPort != null) {
-              mPort.postMessage(msg);
-            }
-            // onMessage mode (sendNativeMessage)
-            GeckoResult<Object> pending = mPendingResults.remove(id);
-            if (pending != null) {
-              pending.complete(msg);
-            }
+            sendToPage(msg);
           } catch (Exception e) {
             Log.e(LOGTAG, "respond failed", e);
           }
         });
   }
 
-  /** Push an asynchronous event to the page. */
+  /** Push an asynchronous event to the page (e.g. ble.deviceFound). */
   public void emit(String event, @Nullable JSONObject data) {
     mMainHandler.post(
         () -> {
-          if (mPort == null) {
-            return;
-          }
           try {
             JSONObject msg = new JSONObject();
+            msg.put("type", "gv-bridge-event");
             msg.put("event", event);
             if (data != null) {
               msg.put("data", data);
             }
-            mPort.postMessage(msg);
+            sendToPage(msg);
           } catch (Exception e) {
             Log.e(LOGTAG, "emit failed", e);
           }
@@ -313,8 +169,22 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     }
   }
 
+  /**
+   * Deliver a JSON message to the page. A JSON object is a legal JavaScript
+   * object literal, so we can pass it straight into the injected callback.
+   */
+  private void sendToPage(JSONObject msg) {
+    final WebView wv = mWebView;
+    if (wv == null) {
+      Log.w(LOGTAG, "sendToPage: WebView not attached");
+      return;
+    }
+    wv.evaluateJavascript(
+        "window.__gvBridgeCallback && window.__gvBridgeCallback(" + msg + ")", null);
+  }
+
   /* ----------------------------------------------------------------------------
-   * Permission helpers
+   * Permission helpers (unchanged semantics)
    * -------------------------------------------------------------------------- */
 
   public interface PermissionCallback {
@@ -326,7 +196,8 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
   private static final Map<Integer, PermissionCallback> sPermissionCallbacks = new HashMap<>();
 
   /** Request runtime permissions from the hosting activity; result handled by the activity. */
-  public static void requestPermissions(Activity activity, int code, String[] permissions, PermissionCallback cb) {
+  public static void requestPermissions(
+      Activity activity, int code, String[] permissions, PermissionCallback cb) {
     boolean allGranted = true;
     for (String p : permissions) {
       if (ActivityCompat.checkSelfPermission(activity, p) != PackageManager.PERMISSION_GRANTED) {
@@ -342,7 +213,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     ActivityCompat.requestPermissions(activity, permissions, code);
   }
 
-  /** Called from GeckoViewActivity.onRequestPermissionsResult. */
+  /** Called from WebViewActivity.onRequestPermissionsResult. */
   public static void onPermissionsResult(int requestCode, @NonNull int[] grantResults) {
     PermissionCallback cb = sPermissionCallbacks.remove(requestCode);
     if (cb == null) {
@@ -395,7 +266,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     return mScreen;
   }
 
-  public GeckoViewActivity activity() {
+  public Activity activity() {
     return mActivity.get();
   }
 
@@ -404,7 +275,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     if (mBle != null) {
       mBle.onDestroy();
     }
-    mPort = null;
+    mWebView = null;
   }
 
   public void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {

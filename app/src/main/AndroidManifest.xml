@@ -38,24 +38,17 @@
             android:icon="@drawable/logo"
             android:requestLegacyExternalStorage="true"
         >
-        <uses-library android:name="android.test.runner"
-                      android:required="false"/>
-
         <activity
             android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize"
-                android:name=".GeckoViewActivity"
-                android:label="GeckoView Example"
+                android:name=".WebViewActivity"
+                android:label="WebView Shell"
                 android:launchMode="singleTop"
                 android:theme="@style/GeckoViewTheme"
-                android:supportsPictureInPicture="true"
-                android:resizeableActivity="true"
                 android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
 
                 <category android:name="android.intent.category.LAUNCHER"/>
-                <category android:name="android.intent.category.MULTIWINDOW_LAUNCHER"/>
-                <category android:name="android.intent.category.APP_BROWSER"/>
                 <category android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
             <intent-filter>
@@ -66,47 +59,13 @@
 
                 <data android:scheme="http"/>
                 <data android:scheme="https"/>
-                <data android:scheme="about"/>
-                <data android:scheme="javascript"/>
             </intent-filter>
-        </activity>
-        <activity
-                android:name=".SessionActivity"
-                android:label="GeckoView Example"
-                android:theme="@style/GeckoViewTheme"
-                android:exported="false">
-        </activity>
-        <activity
-                android:name=".PictureInPictureActivity"
-                android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"
-                android:exported="false"
-                android:launchMode="singleTask"
-                android:resizeableActivity="true"
-                android:supportsPictureInPicture="true"
-                android:taskAffinity="${applicationId}.PictureInPicture"
-                android:theme="@style/GeckoViewTheme">
-        </activity>
-        <activity
-                android:name=".SettingsActivity"
-                android:label="Settings"
-                android:exported="false"
-                android:theme="@style/GeckoViewTheme">
         </activity>
 
         <service
             android:name=".jsbridge.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
-
-        <service
-            android:name=".ExampleCrashHandler"
-            android:exported="false"
-            android:foregroundServiceType="specialUse"
-            android:process=":crash">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="This foreground service allows users to report crashes" />
-        </service>
     </application>
 
 </manifest>

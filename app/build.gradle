@@ -14,9 +14,6 @@ android {
         targetSdk 36
         versionCode 1
         versionName "0.1.0"
-        ndk {
-            abiFilters 'arm64-v8a'
-        }
     }
 
     buildTypes {
@@ -26,55 +23,13 @@ android {
         }
     }
 
-    // By default the android plugins ignores folders that start with `_`, but
-    // we need those in web extensions.
-    // See also:
-    //  - https://issuetracker.google.com/issues/36911326
-    //  - https://stackoverflow.com/questions/9206117/how-to-workaround-autoomitting-fiiles-folders-starting-with-underscore-in
-    androidResources {
-        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
-        noCompress 'ja'
-    }
-
     buildFeatures {
         buildConfig = true
     }
 }
 
-// 构建时把 webextension/ 目录打包成标准 XPI（GeckoView install() 需要）
-tasks.register('packageWebExtension') {
-    def srcDir = file('src/main/assets/webextension')
-    def outFile = file('src/main/assets/webextension.xpi')
-    inputs.dir srcDir
-    outputs.file outFile
-    doLast {
-        if (outFile.exists()) {
-            outFile.delete()
-        }
-        def cmd = ['zip', '-r', '-q', outFile.absolutePath, '.']
-        def proc = new ProcessBuilder(cmd)
-                .directory(srcDir)
-                .redirectErrorStream(true)
-                .start()
-        proc.waitFor()
-        if (proc.exitValue() != 0) {
-            throw new GradleException('packageWebExtension failed')
-        }
-    }
-}
-preBuild.dependsOn packageWebExtension
-
 dependencies {
-    // GeckoView 引擎（Mozilla Maven，nightly 通道，与 main 分支 example 源码同步）
-    implementation "org.mozilla.geckoview:geckoview-nightly:160.0.20261021205324"
-
-    implementation 'androidx.annotation:annotation:1.8.2'
-    implementation 'androidx.annotation:annotation-experimental:1.4.1'
     implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'androidx.collection:collection:1.4.4'
-    implementation 'androidx.constraintlayout:constraintlayout:2.2.0'
     implementation 'androidx.core:core:1.15.0'
-    implementation 'androidx.lifecycle:lifecycle-common:2.8.7'
-    implementation 'androidx.preference:preference:1.2.1'
-    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.annotation:annotation:1.8.2'
 }
