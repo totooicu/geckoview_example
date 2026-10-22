@@ -170,7 +170,6 @@
       invoke: function (action, params) {
         var self = this;
         return new Promise(function (resolve, reject) {
-          if (!self.ready) { reject(new Error('桥未连接')); return; }
           var id = 'r' + (++self._seq);
           self._pending.set(id, { resolve: resolve, reject: reject });
           window.dispatchEvent(new CustomEvent('gv-bridge-request', {
