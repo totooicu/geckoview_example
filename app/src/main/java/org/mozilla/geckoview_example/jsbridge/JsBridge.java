@@ -38,7 +38,7 @@ import java.util.Map;
 public class JsBridge implements WebExtension.MessageDelegate, WebExtension.PortDelegate {
   private static final String LOGTAG = "JsBridge";
   private static final String NATIVE_APP = "bridge";
-  private static final String EXTENSION_URI = "resource://android/assets/webextension/";
+  private static final String EXTENSION_URI = "resource://android/assets/webextension.xpi";
 
   /** Permission request codes. */
   public static final int PERM_BLE = 1001;
@@ -94,8 +94,10 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
   }
 
   private void installFresh(WebExtensionController controller) {
+    // 用标准 XPI（zip）安装，绕开 installBuiltIn 的打包环节；
+    // installBuiltIn 在 nightly 160 打包出的扩展缺失 manifest 字段导致 "must include an id, version, and type"
     controller
-        .installBuiltIn(EXTENSION_URI)
+        .install(EXTENSION_URI)
         .accept(
             extension -> {
               mExtension = extension;

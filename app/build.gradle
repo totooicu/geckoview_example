@@ -41,6 +41,29 @@ android {
     }
 }
 
+// 构建时把 webextension/ 目录打包成标准 XPI（GeckoView install() 需要）
+tasks.register('packageWebExtension') {
+    def srcDir = file('src/main/assets/webextension')
+    def outFile = file('src/main/assets/webextension.xpi')
+    inputs.dir srcDir
+    outputs.file outFile
+    doLast {
+        if (outFile.exists()) {
+            outFile.delete()
+        }
+        def cmd = ['zip', '-r', '-q', outFile.absolutePath, '.']
+        def proc = new ProcessBuilder(cmd)
+                .directory(srcDir)
+                .redirectErrorStream(true)
+                .start()
+        proc.waitFor()
+        if (proc.exitValue() != 0) {
+            throw new GradleException('packageWebExtension failed')
+        }
+    }
+}
+preBuild.dependsOn packageWebExtension
+
 dependencies {
     // GeckoView 引擎（Mozilla Maven，nightly 通道，与 main 分支 example 源码同步）
     implementation "org.mozilla.geckoview:geckoview-nightly:160.0.20261021205324"
