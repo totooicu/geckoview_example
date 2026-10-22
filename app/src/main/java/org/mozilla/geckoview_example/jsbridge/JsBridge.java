@@ -49,6 +49,8 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
 
   @Nullable private WebExtension.Port mPort;
   @Nullable private WebExtension mExtension;
+  /** onMessage (sendNativeMessage) 模式下，按请求 id 暂存待完成的 GeckoResult。 */
+  private final Map<String, GeckoResult<Object>> mPendingResults = new HashMap<>();
 
   private BleManager mBle;
   private FileBridge mFiles;
@@ -182,6 +184,36 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     mMainHandler.post(() -> android.widget.Toast.makeText(a, text, android.widget.Toast.LENGTH_LONG).show());
   }
 
+  /* ----------------------------------------------------------------------------
+   * MessageDelegate: onMessage (sendNativeMessage, request-response)
+   * -------------------------------------------------------------------------- */
+
+  @Override
+  public GeckoResult<Object> onMessage(
+      String nativeApp, Object message, WebExtension.MessageSender sender) {
+    Log.i(LOGTAG, "onMessage: " + nativeApp + " " + message);
+    toast("原生 onMessage: " + nativeApp);
+    GeckoResult<Object> result = new GeckoResult<>();
+    try {
+      JSONObject json = (JSONObject) message;
+      final String id = json.optString("id", "");
+      final String action = json.optString("action", "");
+      final JSONObject params = json.optJSONObject("params");
+      if (!id.isEmpty()) {
+        mPendingResults.put(id, result);
+      }
+      dispatch(id, action, params == null ? new JSONObject() : params);
+    } catch (Exception e) {
+      Log.e(LOGTAG, "onMessage dispatch failed", e);
+      result.completeExceptionally(e);
+    }
+    return result;
+  }
+
+  /* ----------------------------------------------------------------------------
+   * MessageDelegate: onConnect (connectNative, bidirectional port)
+   * -------------------------------------------------------------------------- */
+
   @Override
   public void onConnect(WebExtension.Port port) {
     Log.i(LOGTAG, "Bridge port connected");
@@ -241,13 +273,10 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
    * Reply / event helpers
    * -------------------------------------------------------------------------- */
 
-  /** Send a success reply to the page. */
+  /** Send a success reply to the page (port mode) or complete the pending GeckoResult (onMessage mode). */
   public void respond(String id, boolean ok, @Nullable JSONObject result, @Nullable String error) {
     mMainHandler.post(
         () -> {
-          if (mPort == null) {
-            return;
-          }
           try {
             JSONObject msg = new JSONObject();
             msg.put("id", id);
@@ -258,7 +287,15 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
             if (error != null) {
               msg.put("error", error);
             }
-            mPort.postMessage(msg);
+            // Port mode (connectNative)
+            if (mPort != null) {
+              mPort.postMessage(msg);
+            }
+            // onMessage mode (sendNativeMessage)
+            GeckoResult<Object> pending = mPendingResults.remove(id);
+            if (pending != null) {
+              pending.complete(msg);
+            }
           } catch (Exception e) {
             Log.e(LOGTAG, "respond failed", e);
           }

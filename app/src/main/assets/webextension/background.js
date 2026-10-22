@@ -1,6 +1,6 @@
-// Bridge background script.
-// Owns the native messaging port (connectNative) and routes messages between
-// page content scripts (runtime.onConnect ports) and the native app.
+// Bridge background script (sendNativeMessage mode).
+// Forwards page content script messages to the native app via
+// browser.runtime.sendNativeMessage("bridge", msg) — request/response, no persistent port.
 (function () {
   "use strict";
 
@@ -8,12 +8,12 @@
     try { console.log("[gv-bridge-bg] " + msg); } catch (e) {}
   }
 
-  log("background started");
+  log("background started (sendNativeMessage mode)");
 
-  var nativePort = null;
   var pagePorts = new Set();
   var nativeAttempts = 0;
   var nativeLastError = "(not attempted)";
+  var nativeLastOk = 0;
 
   function broadcastHeartbeat() {
     for (var p of pagePorts) {
@@ -21,54 +21,15 @@
         p.postMessage({
           event: "bg-heartbeat",
           data: {
-            nativeConnected: !!nativePort,
+            mode: "sendNativeMessage",
             nativeAttempts: nativeAttempts,
             nativeLastError: nativeLastError,
+            nativeLastOk: nativeLastOk,
             pagePorts: pagePorts.size
           }
         });
       } catch (e) {}
     }
-  }
-
-  function connectNative() {
-    nativeAttempts++;
-    nativeLastError = "(connecting...)";
-    broadcastHeartbeat();
-    log("connectNative attempt " + nativeAttempts);
-    try {
-      nativePort = browser.runtime.connectNative("bridge");
-    } catch (e) {
-      nativeLastError = "THREW: " + e;
-      log("connectNative THREW: " + e);
-      broadcastHeartbeat();
-      setTimeout(connectNative, 1000);
-      return;
-    }
-    if (!nativePort) {
-      nativeLastError = "returned null";
-      broadcastHeartbeat();
-      setTimeout(connectNative, 1000);
-      return;
-    }
-    nativeLastError = "(connected, waiting for messages)";
-    broadcastHeartbeat();
-    log("nativePort created");
-
-    nativePort.onMessage.addListener(function (msg) {
-      log("native -> pages: " + JSON.stringify(msg).substring(0, 200));
-      for (var p of pagePorts) {
-        try { p.postMessage(msg); } catch (e) {}
-      }
-    });
-    nativePort.onDisconnect.addListener(function () {
-      var err = browser.runtime.lastError;
-      nativeLastError = "disconnected: " + (err ? err.message : "no lastError");
-      log("nativePort disconnected. lastError=" + (err ? err.message : "none"));
-      nativePort = null;
-      broadcastHeartbeat();
-      setTimeout(connectNative, 1000);
-    });
   }
 
   browser.runtime.onConnect.addListener(function (port) {
@@ -79,25 +40,35 @@
     }
     pagePorts.add(port);
     broadcastHeartbeat();
+
     port.onMessage.addListener(function (msg) {
       log("page -> native: " + JSON.stringify(msg).substring(0, 200));
-      if (nativePort && msg) {
-        try {
-          nativePort.postMessage(msg);
-        } catch (e) {
-          log("nativePort.postMessage THREW: " + e);
-          port.postMessage({ id: msg.id, ok: false, error: "native post failed: " + e });
-        }
-      } else {
-        log("dropping page message: nativePort=" + !!nativePort);
-        port.postMessage({ id: msg.id, ok: false, error: "native port not connected (" + nativeLastError + ")" });
-      }
+      nativeAttempts++;
+      nativeLastError = "(sending...)";
+      broadcastHeartbeat();
+
+      browser.runtime.sendNativeMessage("bridge", msg)
+        .then(function (resp) {
+          nativeLastOk++;
+          nativeLastError = "(ok)";
+          log("native -> page: " + JSON.stringify(resp).substring(0, 200));
+          broadcastHeartbeat();
+          try { port.postMessage(resp); } catch (e) {}
+        })
+        .catch(function (err) {
+          var msg2 = (err && err.message) ? err.message : String(err);
+          nativeLastError = "sendNativeMessage failed: " + msg2;
+          log("sendNativeMessage FAILED: " + msg2);
+          broadcastHeartbeat();
+          try {
+            port.postMessage({ id: msg.id, ok: false, error: nativeLastError });
+          } catch (e) {}
+        });
     });
+
     port.onDisconnect.addListener(function () {
       log("page port disconnected");
       pagePorts.delete(port);
     });
   });
-
-  connectNative();
 })();

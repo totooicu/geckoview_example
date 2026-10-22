@@ -69,9 +69,7 @@
       if (!msg) return;
       if (msg.event === "bg-heartbeat" && msg.data) {
         try {
-          var d = msg.data;
-          document.documentElement.setAttribute("data-gv-bridge-native",
-            "connected=" + d.nativeConnected + " attempts=" + d.nativeAttempts + " lastError=" + d.nativeLastError);
+          document.documentElement.setAttribute("data-gv-bridge-native", JSON.stringify(msg.data));
         } catch (e) {}
         return; // heartbeats are internal, don't forward to page
       }
