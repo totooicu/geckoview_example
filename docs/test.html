@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GeckoView 壳测试页</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1f2937;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { font-size: 13px; color: #6b7280; margin-bottom: 16px; }
+  .card {
+    background: #fff; border-radius: 12px; padding: 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 12px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 8px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0; }
+  button {
+    padding: 10px 16px; border: none; border-radius: 8px;
+    background: #2563eb; color: #fff; font-size: 14px; cursor: pointer;
+  }
+  button:disabled { background: #9ca3af; }
+  button.secondary { background: #6b7280; }
+  #mic-status, #loc-status, #ua {
+    font-size: 13px; padding: 8px 10px; border-radius: 8px;
+    background: #f3f4f6; word-break: break-all;
+  }
+  .ok { color: #16a34a; }
+  .err { color: #dc2626; }
+  #meter-wrap { height: 10px; background: #e5e7eb; border-radius: 5px; overflow: hidden; width: 100%; }
+  #meter { height: 100%; width: 0%; background: #16a34a; transition: width .1s; }
+</style>
+</head>
+<body>
+  <h1>GeckoView 壳测试页</h1>
+  <div class="sub">页面由 assets 本地加载 · 用于验证壳、内核与权限链路</div>
+
+  <div class="card">
+    <h2>引擎信息</h2>
+    <div class="row">
+      <button id="btn-ua">刷新</button>
+    </div>
+    <div id="ua"></div>
+  </div>
+
+  <div class="card">
+    <h2>麦克风测试（getUserMedia）</h2>
+    <div class="row">
+      <button id="btn-mic">请求麦克风</button>
+      <button id="btn-mic-stop" class="secondary" disabled>停止</button>
+    </div>
+    <div id="mic-status">未测试</div>
+    <div id="meter-wrap" style="margin-top:8px;display:none"><div id="meter"></div></div>
+  </div>
+
+  <div class="card">
+    <h2>定位测试（geolocation）</h2>
+    <div class="row">
+      <button id="btn-loc">请求定位</button>
+    </div>
+    <div id="loc-status">未测试</div>
+  </div>
+
+<script>
+  (function () {
+    var uaBox = document.getElementById('ua');
+    function renderUA() {
+      var secure = (window.isSecureContext !== undefined) ? (window.isSecureContext ? '是' : '否') : '未知';
+      uaBox.innerHTML = 'UserAgent：<br>' + navigator.userAgent +
+        '<br>SecureContext：' + secure +
+        '<br>Gecko 内核：' + (navigator.userAgent.indexOf('Gecko') >= 0 ? '是' : '否');
+    }
+    document.getElementById('btn-ua').addEventListener('click', renderUA);
+    renderUA();
+
+    // 麦克风
+    var stream = null, audioCtx = null, rafId = null;
+    var micStatus = document.getElementById('mic-status');
+    var btnMic = document.getElementById('btn-mic');
+    var btnStop = document.getElementById('btn-mic-stop');
+    var meterWrap = document.getElementById('meter-wrap');
+    var meter = document.getElementById('meter');
+
+    btnMic.addEventListener('click', function () {
+      micStatus.className = '';
+      micStatus.textContent = '请求中…';
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(function (s) {
+          stream = s;
+          micStatus.className = 'ok';
+          micStatus.textContent = '已授权。轨道数：' + s.getAudioTracks().length +
+            '，采样率：' + (s.getAudioTracks()[0].getSettings().sampleRate || '未知');
+          btnMic.disabled = true;
+          btnStop.disabled = false;
+          meterWrap.style.display = 'block';
+          try {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            var src = audioCtx.createMediaStreamSource(s);
+            var analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            src.connect(analyser);
+            var data = new Uint8Array(analyser.frequencyBinCount);
+            function tick() {
+              analyser.getByteFrequencyData(data);
+              var sum = 0;
+              for (var i = 0; i < data.length; i++) sum += data[i];
+              var level = sum / data.length / 255 * 100;
+              meter.style.width = level + '%';
+              rafId = requestAnimationFrame(tick);
+            }
+            tick();
+          } catch (e) {
+            micStatus.textContent += '（音量监测不可用：' + e.message + '）';
+          }
+        })
+        .catch(function (err) {
+          micStatus.className = 'err';
+          micStatus.textContent = '被拒绝或失败：' + (err && err.name ? err.name : err) +
+            ' · ' + (err && err.message ? err.message : '');
+        });
+    });
+
+    btnStop.addEventListener('click', function () {
+      if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+      if (audioCtx) { audioCtx.close(); audioCtx = null; }
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+      meter.style.width = '0%';
+      meterWrap.style.display = 'none';
+      micStatus.className = '';
+      micStatus.textContent = '已停止';
+      btnMic.disabled = false;
+      btnStop.disabled = true;
+    });
+
+    // 定位
+    var locStatus = document.getElementById('loc-status');
+    document.getElementById('btn-loc').addEventListener('click', function () {
+      locStatus.className = '';
+      locStatus.textContent = '请求中…';
+      navigator.geolocation.getCurrentPosition(
+        function (pos) {
+          locStatus.className = 'ok';
+          locStatus.textContent = '纬度 ' + pos.coords.latitude.toFixed(4) +
+            '，经度 ' + pos.coords.longitude.toFixed(4) +
+            '，精度 ' + (pos.coords.accuracy || '未知') + 'm';
+        },
+        function (err) {
+          locStatus.className = 'err';
+          locStatus.textContent = '失败：' + err.code + ' ' + err.message;
+        },
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 0 }
+      );
+    });
+  })();
+</script>
+</body>
+</html>
