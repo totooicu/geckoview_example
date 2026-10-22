@@ -473,6 +473,9 @@ public class GeckoViewActivity extends AppCompatActivity
 
   private static GeckoRuntime sGeckoRuntime;
 
+  /** Local HTTP server serving assets/test.html on 127.0.0.1 (started in onCreate). */
+  @Nullable private static org.mozilla.geckoview_example.jsbridge.LocalPageServer sPageServer;
+
   @Nullable private JsBridge mJsBridge;
 
   /** @return the shared GeckoRuntime instance (created lazily in onCreate). */
@@ -1098,6 +1101,9 @@ public class GeckoViewActivity extends AppCompatActivity
     // Native bridge: install the bridge WebExtension and attach the port delegate.
     mJsBridge = new JsBridge(this);
     mJsBridge.install(this);
+    if (sPageServer == null) {
+      sPageServer = org.mozilla.geckoview_example.jsbridge.LocalPageServer.start(this);
+    }
 
     sExtensionManager.setExtensionDelegate(this);
 
@@ -2079,10 +2085,15 @@ public class GeckoViewActivity extends AppCompatActivity
                   .uri(uri.toString())
                   .flags(GeckoSession.LOAD_FLAGS_EXTERNAL));
     } else {
-      // 无外部 URL 时默认加载本地测试页
+      // 无外部 URL 时默认加载本地测试页（经 127.0.0.1 本地服务，
+      // 保证扩展 content script 注入与安全上下文）
+      String url =
+          sPageServer != null
+              ? sPageServer.getBaseUrl() + "test.html"
+              : "file:///android_asset/test.html";
       mTabSessionManager
           .getCurrentSession()
-          .load(new GeckoSession.Loader().uri("file:///android_asset/test.html"));
+          .load(new GeckoSession.Loader().uri(url));
     }
   }
 
