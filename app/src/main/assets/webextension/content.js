@@ -8,8 +8,16 @@
 (function () {
   "use strict";
 
-  // Diagnostic: visible to the page so the test page can report injection status.
-  window.__gvBridgeInjected = true;
+  // Diagnostic: mark injection on the shared DOM (content scripts run in an
+  // isolated world, so window.* variables are NOT visible to the page).
+  function markInjected() {
+    if (document.documentElement) {
+      document.documentElement.setAttribute("data-gv-bridge-injected", "true");
+    } else {
+      setTimeout(markInjected, 50);
+    }
+  }
+  markInjected();
   try {
     console.log("[gv-bridge] content script injected");
   } catch (e) {

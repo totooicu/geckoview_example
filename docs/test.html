@@ -229,7 +229,8 @@
       bridgeDiag();
     });
     function bridgeDiag() {
-      var injected = window.__gvBridgeInjected === true;
+      var injected = document.documentElement &&
+        document.documentElement.getAttribute('data-gv-bridge-injected') === 'true';
       var msg = 'content script 注入：' + (injected ? '✓ 已注入' : '✗ 未注入') + ' | ';
       window.gvBridge.invoke('ping', {})
         .then(function (r) {
