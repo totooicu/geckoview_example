@@ -38,7 +38,7 @@ import java.util.Map;
 public class JsBridge implements WebExtension.MessageDelegate, WebExtension.PortDelegate {
   private static final String LOGTAG = "JsBridge";
   private static final String NATIVE_APP = "bridge";
-  private static final String EXTENSION_URI = "resource://android/assets/webextension.xpi";
+  private static final String EXTENSION_URI = "resource://android/assets/webextension/";
 
   /** Permission request codes. */
   public static final int PERM_BLE = 1001;
@@ -94,40 +94,21 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
   }
 
   private void installFresh(WebExtensionController controller) {
-    // 把 assets 里的 webextension.xpi 复制到私有目录，用 file:// 安装（等同桌面端"临时加载扩展"，
-    // 未签名也可安装）；resource:// 与 installBuiltIn 在 nightly 160 均不可靠。
-    final GeckoViewActivity a = mActivity.get();
-    if (a == null) {
-      return;
-    }
-    try {
-      java.io.InputStream in = a.getAssets().open("webextension.xpi");
-      java.io.File out = new java.io.File(a.getFilesDir(), "webextension.xpi");
-      try (java.io.FileOutputStream fos = new java.io.FileOutputStream(out)) {
-        byte[] buf = new byte[8192];
-        int n;
-        while ((n = in.read(buf)) > 0) {
-          fos.write(buf, 0, n);
-        }
-      }
-      in.close();
-      controller
-          .install("file://" + out.getAbsolutePath())
-          .accept(
-              extension -> {
-                mExtension = extension;
-                extension.setMessageDelegate(this, NATIVE_APP);
-                Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
-                toast("桥扩展已安装 v1.0.6");
-              },
-              e -> {
-                Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
-                showInstallError(e);
-              });
-    } catch (Exception ex) {
-      Log.e(LOGTAG, "copy xpi failed", ex);
-      showInstallError(ex);
-    }
+    // 官方标准方式：installBuiltIn 从 resource:// 目录打包安装。
+    // 之前失败是因为 manifest 的 id 写在顶层（被 Gecko 忽略），现已移到 applications.gecko.id。
+    controller
+        .installBuiltIn(EXTENSION_URI)
+        .accept(
+            extension -> {
+              mExtension = extension;
+              extension.setMessageDelegate(this, NATIVE_APP);
+              Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
+              toast("桥扩展已安装 v1.0.6");
+            },
+            e -> {
+              Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
+              showInstallError(e);
+            });
   }
 
   /** 用 AlertDialog 显示完整错误，并把全文复制到剪贴板（正文可能显示不全/过淡）。 */
