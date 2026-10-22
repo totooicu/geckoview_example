@@ -118,7 +118,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
                 mExtension = extension;
                 extension.setMessageDelegate(this, NATIVE_APP);
                 Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
-                toast("桥扩展已安装 v1.0.5");
+                toast("桥扩展已安装 v1.0.6");
               },
               e -> {
                 Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
@@ -181,7 +181,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
           } catch (Exception ignored) {
           }
           new android.app.AlertDialog.Builder(a)
-              .setTitle("桥扩展安装失败 v1.0.5（完整错误）")
+              .setTitle("桥扩展安装失败 v1.0.6（完整错误）")
               .setMessage(text + "\n\n[错误全文已复制到剪贴板，直接粘贴即可]")
               .setPositiveButton("知道了", null)
               .show();
