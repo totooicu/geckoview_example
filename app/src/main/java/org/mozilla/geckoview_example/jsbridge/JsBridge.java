@@ -66,7 +66,34 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
    * -------------------------------------------------------------------------- */
 
   public void install(GeckoViewActivity activity) {
-    WebExtensionController controller = activity.getGeckoRuntime().getWebExtensionController();
+    final WebExtensionController controller = activity.getGeckoRuntime().getWebExtensionController();
+    controller
+        .list()
+        .accept(
+            installed -> {
+              // 先卸载所有旧的同名实例（可能残留 MV3 坏实例或脏状态），再全新安装
+              removeOld(controller, installed);
+            },
+            e -> installFresh(controller));
+  }
+
+  private void removeOld(WebExtensionController controller, java.util.List<WebExtension> installed) {
+    removeAll(controller, installed, 0);
+  }
+
+  /** 递归卸载全部已装扩展（App 内只会存在本桥扩展），再全新安装避免脏状态。 */
+  private void removeAll(
+      WebExtensionController controller, java.util.List<WebExtension> installed, int index) {
+    if (index >= installed.size()) {
+      installFresh(controller);
+      return;
+    }
+    controller.uninstall(installed.get(index)).accept(
+        unused -> removeAll(controller, installed, index + 1),
+        e -> removeAll(controller, installed, index + 1));
+  }
+
+  private void installFresh(WebExtensionController controller) {
     controller
         .installBuiltIn(EXTENSION_URI)
         .accept(
