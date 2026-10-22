@@ -215,6 +215,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     if (mPort == port) {
       mPort = null;
     }
+    toast("原生桥已断开");
   }
   /* ----------------------------------------------------------------------------
    * Routing

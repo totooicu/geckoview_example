@@ -229,17 +229,17 @@
       bridgeDiag();
     });
     function bridgeDiag() {
-      var injected = document.documentElement &&
-        document.documentElement.getAttribute('data-gv-bridge-injected') === 'true';
-      var msg = 'content script 注入：' + (injected ? '✓ 已注入' : '✗ 未注入') + ' | ';
+      var de = document.documentElement;
+      var injected = de && de.getAttribute('data-gv-bridge-injected') === 'true';
+      var stage = de ? (de.getAttribute('data-gv-bridge-stage') || '(none)') : '(none)';
+      var msg = '注入：' + (injected ? '✓' : '✗') + ' | 链路阶段：' + stage + ' | ';
       window.gvBridge.invoke('ping', {})
         .then(function (r) {
           window.gvBridge.ready = true;
           log(bridgeStatus, msg + '桥已连接 ✓ ' + JSON.stringify(r), 'ok');
         })
         .catch(function (err) {
-          log(bridgeStatus, msg + '桥未连接：' + err.message +
-            (injected ? '（注入成功但原生链路未通，看 App 弹出的 Toast）' : '（扩展未注入页面，看 App 弹出的 Toast 安装结果）'), 'err');
+          log(bridgeStatus, msg + '桥未连接：' + err.message, 'err');
         });
     }
     setTimeout(bridgeDiag, 600);
