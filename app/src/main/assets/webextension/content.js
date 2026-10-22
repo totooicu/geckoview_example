@@ -1,6 +1,9 @@
 // GeckoView Bridge content script.
-// Bridges the page (via window.postMessage, which works across isolated worlds)
-// and the extension background (via runtime port).
+// Directly calls browser.runtime.sendNativeMessage (no background hop),
+// because MV2 background's environmentType may be UNKNOWN and getDelegate
+// only resolves global delegate for environmentType==1.
+// Content script has a non-null sender.session, so it takes the session-level
+// delegate path, which we register via SessionController.setMessageDelegate.
 (function () {
   "use strict";
 
@@ -23,93 +26,54 @@
   }
   markInjected();
   setStage("content-started");
-  try { console.log("[gv-bridge] content script injected"); } catch (e) {}
+  try { console.log("[gv-bridge] content script injected (direct mode)"); } catch (e) {}
 
   var PAGE_REQUEST = "gv-bridge-request";
   var PAGE_RESPONSE = "gv-bridge-response";
   var PAGE_EVENT = "gv-bridge-event";
 
-  var bgPort = null;
-  var retryTimer = null;
-  var connectAttempts = 0;
-
   function postToPage(obj) {
     try { window.postMessage(obj, "*"); } catch (e) {}
-  }
-
-  function connect() {
-    connectAttempts++;
-    setStage("bg-connecting-attempt-" + connectAttempts);
-    if (retryTimer) {
-      clearTimeout(retryTimer);
-      retryTimer = null;
-    }
-    var bgPortLocal;
-    try {
-      bgPortLocal = browser.runtime.connect({ name: "page" });
-    } catch (e) {
-      setStage("bg-connect-threw: " + e);
-      retryTimer = setTimeout(connect, 1000);
-      return;
-    }
-    if (!bgPortLocal) {
-      setStage("bg-connect-returned-null");
-      retryTimer = setTimeout(connect, 1000);
-      return;
-    }
-    bgPort = bgPortLocal;
-    setStage("bg-port-created");
-
-    bgPort.onMessage.addListener(function (msg) {
-      setStage("bg-message-received");
-      if (!msg) return;
-      if (msg.event === "bg-heartbeat" && msg.data) {
-        try {
-          document.documentElement.setAttribute("data-gv-bridge-native", JSON.stringify(msg.data));
-        } catch (e) {}
-        return;
-      }
-      if (msg.event) {
-        postToPage({ type: PAGE_EVENT, event: msg.event, data: msg.data });
-      } else {
-        postToPage({
-          type: PAGE_RESPONSE,
-          id: msg.id,
-          ok: msg.ok,
-          result: msg.result,
-          error: msg.error
-        });
-      }
-    });
-    bgPort.onDisconnect.addListener(function () {
-      setStage("bg-disconnected");
-      bgPort = null;
-      retryTimer = setTimeout(connect, 1000);
-    });
-    setStage("bg-connected-waiting");
   }
 
   // Listen for page requests via window.postMessage (cross-world safe).
   window.addEventListener("message", function (e) {
     var msg = e.data;
     if (!msg || msg.type !== PAGE_REQUEST) return;
-    setStage("page-msg-received:" + (msg.action || "?"));
-    if (!bgPort) {
-      postToPage({
-        type: PAGE_RESPONSE,
-        id: msg.id,
-        ok: false,
-        error: "bg port not connected"
-      });
-      return;
-    }
+    setStage("page-msg:" + (msg.action || "?"));
+
     try {
-      bgPort.postMessage({
+      browser.runtime.sendNativeMessage("bridge", {
         id: msg.id,
         action: msg.action,
         params: msg.params || {}
+      }).then(function (resp) {
+        setStage("native-ok:" + (resp && resp.ok));
+        try { console.log("[gv-bridge] native resp: " + JSON.stringify(resp).substring(0, 200)); } catch (e) {}
+        if (resp && resp.event) {
+          postToPage({ type: PAGE_EVENT, event: resp.event, data: resp.data });
+        } else {
+          postToPage({
+            type: PAGE_RESPONSE,
+            id: resp ? resp.id : msg.id,
+            ok: resp ? resp.ok : false,
+            result: resp ? resp.result : null,
+            error: resp ? resp.error : "empty response"
+          });
+        }
+      }).catch(function (err) {
+        var emsg = (err && err.message) ? err.message : String(err);
+        setStage("native-err:" + emsg);
+        try { console.log("[gv-bridge] sendNativeMessage FAILED: " + emsg); } catch (e) {}
+        postToPage({
+          type: PAGE_RESPONSE,
+          id: msg.id,
+          ok: false,
+          error: "native: " + emsg
+        });
       });
     } catch (err) {
+      setStage("bridge-threw:" + err);
       postToPage({
         type: PAGE_RESPONSE,
         id: msg.id,
@@ -118,6 +82,4 @@
       });
     }
   });
-
-  connect();
 })();
