@@ -137,21 +137,35 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
       return;
     }
     StringBuilder sb = new StringBuilder();
-    Throwable t = e;
-    int depth = 0;
-    while (t != null && depth < 8) {
-      if (sb.length() > 0) {
-        sb.append("\n--- caused by ---\n");
+    if (e instanceof WebExtension.InstallException) {
+      WebExtension.InstallException ie = (WebExtension.InstallException) e;
+      sb.append("InstallException code=")
+          .append(ie.code)
+          .append(" id=")
+          .append(String.valueOf(ie.extensionId))
+          .append(" name=")
+          .append(String.valueOf(ie.extensionName))
+          .append(" version=")
+          .append(String.valueOf(ie.extensionVersion))
+          .append("\ntoString: ")
+          .append(String.valueOf(ie.toString()));
+    } else {
+      Throwable t = e;
+      int depth = 0;
+      while (t != null && depth < 8) {
+        if (sb.length() > 0) {
+          sb.append("\n--- caused by ---\n");
+        }
+        String msg = t.getMessage();
+        sb.append(t.getClass().getName())
+            .append(": ")
+            .append(msg == null || msg.isEmpty() ? "(no message)" : msg);
+        t = t.getCause();
+        depth++;
       }
-      String msg = t.getMessage();
-      sb.append(t.getClass().getName())
-          .append(": ")
-          .append(msg == null || msg.isEmpty() ? "(no message)" : msg);
-      t = t.getCause();
-      depth++;
-    }
-    if (sb.length() == 0) {
-      sb.append("(empty error)");
+      if (sb.length() == 0) {
+        sb.append("(empty error)");
+      }
     }
     final String text = sb.toString();
     mMainHandler.post(
