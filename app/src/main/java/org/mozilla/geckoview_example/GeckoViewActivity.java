@@ -2085,15 +2085,10 @@ public class GeckoViewActivity extends AppCompatActivity
                   .uri(uri.toString())
                   .flags(GeckoSession.LOAD_FLAGS_EXTERNAL));
     } else {
-      // 无外部 URL 时默认加载本地测试页（经 127.0.0.1 本地服务，
-      // 保证扩展 content script 注入与安全上下文）
-      String url =
-          sPageServer != null
-              ? sPageServer.getBaseUrl() + "test.html"
-              : "file:///android_asset/test.html";
+      // 无外部 URL 时默认加载在线测试页（GitHub Pages）；失败时由 onLoadError 回退本地页
       mTabSessionManager
           .getCurrentSession()
-          .load(new GeckoSession.Loader().uri(url));
+          .load(new GeckoSession.Loader().uri("https://totooicu.github.io/geckoview_example/test.html"));
     }
   }
 
@@ -2971,6 +2966,16 @@ public class GeckoViewActivity extends AppCompatActivity
       Log.d(
           LOGTAG,
           "onLoadError=" + uri + " error category=" + error.category + " error=" + error.code);
+
+      // 在线测试页加载失败（如无网络）时回退到本地 127.0.0.1 页
+      if (uri != null && uri.startsWith("https://totooicu.github.io/")) {
+        String local =
+            sPageServer != null ? sPageServer.getBaseUrl() + "test.html" : null;
+        if (local != null) {
+          Log.i(LOGTAG, "online page failed, falling back to " + local);
+          return GeckoResult.fromValue(local);
+        }
+      }
 
       return GeckoResult.fromValue("data:text/html," + createErrorPage(error.category, error.code));
     }
