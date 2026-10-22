@@ -94,21 +94,40 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
   }
 
   private void installFresh(WebExtensionController controller) {
-    // 用标准 XPI（zip）安装，绕开 installBuiltIn 的打包环节；
-    // installBuiltIn 在 nightly 160 打包出的扩展缺失 manifest 字段导致 "must include an id, version, and type"
-    controller
-        .install(EXTENSION_URI)
-        .accept(
-            extension -> {
-              mExtension = extension;
-              extension.setMessageDelegate(this, NATIVE_APP);
-              Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
-              toast("桥扩展已安装 v1.0.5");
-            },
-            e -> {
-              Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
-              showInstallError(e);
-            });
+    // 把 assets 里的 webextension.xpi 复制到私有目录，用 file:// 安装（等同桌面端"临时加载扩展"，
+    // 未签名也可安装）；resource:// 与 installBuiltIn 在 nightly 160 均不可靠。
+    final GeckoViewActivity a = mActivity.get();
+    if (a == null) {
+      return;
+    }
+    try {
+      java.io.InputStream in = a.getAssets().open("webextension.xpi");
+      java.io.File out = new java.io.File(a.getFilesDir(), "webextension.xpi");
+      try (java.io.FileOutputStream fos = new java.io.FileOutputStream(out)) {
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+          fos.write(buf, 0, n);
+        }
+      }
+      in.close();
+      controller
+          .install("file://" + out.getAbsolutePath())
+          .accept(
+              extension -> {
+                mExtension = extension;
+                extension.setMessageDelegate(this, NATIVE_APP);
+                Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
+                toast("桥扩展已安装 v1.0.5");
+              },
+              e -> {
+                Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
+                showInstallError(e);
+              });
+    } catch (Exception ex) {
+      Log.e(LOGTAG, "copy xpi failed", ex);
+      showInstallError(ex);
+    }
   }
 
   /** 用 AlertDialog 显示完整错误（Toast 会截断长文案，无法定位）。 */
@@ -117,13 +136,24 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     if (a == null) {
       return;
     }
-    String detail = e.getMessage();
-    Throwable cause = e.getCause();
-    while (cause != null && detail.length() < 1500) {
-      detail = detail + "\ncaused by: " + cause.getMessage();
-      cause = cause.getCause();
+    StringBuilder sb = new StringBuilder();
+    Throwable t = e;
+    int depth = 0;
+    while (t != null && depth < 6) {
+      if (sb.length() > 0) {
+        sb.append("\n--- caused by ---\n");
+      }
+      String msg = t.getMessage();
+      sb.append(t.getClass().getSimpleName())
+          .append(": ")
+          .append(msg == null || msg.isEmpty() ? "(no message)" : msg);
+      t = t.getCause();
+      depth++;
     }
-    final String text = detail;
+    if (sb.length() == 0) {
+      sb.append("(empty error)");
+    }
+    final String text = sb.toString();
     mMainHandler.post(
         () ->
             new android.app.AlertDialog.Builder(a)
