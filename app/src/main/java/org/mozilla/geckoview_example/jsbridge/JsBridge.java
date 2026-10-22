@@ -130,7 +130,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     }
   }
 
-  /** 用 AlertDialog 显示完整错误（Toast 会截断长文案，无法定位）。 */
+  /** 用 AlertDialog 显示完整错误，并把全文复制到剪贴板（正文可能显示不全/过淡）。 */
   private void showInstallError(final Throwable e) {
     final GeckoViewActivity a = mActivity.get();
     if (a == null) {
@@ -139,12 +139,12 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     StringBuilder sb = new StringBuilder();
     Throwable t = e;
     int depth = 0;
-    while (t != null && depth < 6) {
+    while (t != null && depth < 8) {
       if (sb.length() > 0) {
         sb.append("\n--- caused by ---\n");
       }
       String msg = t.getMessage();
-      sb.append(t.getClass().getSimpleName())
+      sb.append(t.getClass().getName())
           .append(": ")
           .append(msg == null || msg.isEmpty() ? "(no message)" : msg);
       t = t.getCause();
@@ -155,12 +155,23 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     }
     final String text = sb.toString();
     mMainHandler.post(
-        () ->
-            new android.app.AlertDialog.Builder(a)
-                .setTitle("桥扩展安装失败（完整错误）")
-                .setMessage(text)
-                .setPositiveButton("知道了", null)
-                .show());
+        () -> {
+          try {
+            android.content.ClipboardManager cm =
+                (android.content.ClipboardManager)
+                    a.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            if (cm != null) {
+              cm.setPrimaryClip(
+                  android.content.ClipData.newPlainText("gvbridge_error", text));
+            }
+          } catch (Exception ignored) {
+          }
+          new android.app.AlertDialog.Builder(a)
+              .setTitle("桥扩展安装失败 v1.0.5（完整错误）")
+              .setMessage(text + "\n\n[错误全文已复制到剪贴板，直接粘贴即可]")
+              .setPositiveButton("知道了", null)
+              .show();
+        });
   }
 
   private void toast(final String text) {
