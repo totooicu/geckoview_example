@@ -16,6 +16,7 @@ import androidx.core.app.ActivityCompat;
 
 import org.json.JSONObject;
 import org.mozilla.geckoview.GeckoResult;
+import org.mozilla.geckoview.GeckoSession;
 import org.mozilla.geckoview.WebExtension;
 import org.mozilla.geckoview.WebExtensionController;
 import org.mozilla.geckoview_example.GeckoViewActivity;
@@ -77,14 +78,20 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
         .accept(
             extension -> {
               mExtension = extension;
+              // 全局注册（background sender.session == null 时走这里）
               extension.setMessageDelegate(this, NATIVE_APP);
+              // Session 级别注册（background sender.session != null 时走这里，两条路径不回退）
+              final GeckoViewActivity act = mActivity.get();
+              if (act != null) {
+                GeckoSession session = act.getCurrentSession();
+                if (session != null) {
+                  session.getWebExtensionController().setMessageDelegate(extension, this, NATIVE_APP);
+                }
+                act.reloadCurrentPage();
+              }
               String eid = extension.id == null ? "NULL!" : extension.id;
               Log.i(LOGTAG, "Bridge extension ensured: id=" + eid);
               toast("桥扩展 v1.0.7 id=" + eid);
-              final GeckoViewActivity act = mActivity.get();
-              if (act != null) {
-                act.reloadCurrentPage();
-              }
             },
             e -> {
               Log.e(LOGTAG, "Bridge extension ENSURE FAILED: " + e.getMessage(), e);
