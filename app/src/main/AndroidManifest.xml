@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 本地 127.0.0.1 测试页与网络加载需要 INTERNET 权限 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- 蓝牙（API 30 及以下为普通权限，API 31+ 为运行时权限） -->
     <uses-permission android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />

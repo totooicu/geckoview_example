@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
+  "id": "gvbridge@totooicu",
   "name": "GeckoView Native Bridge",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Bridge between page JS and native Android modules (BLE, files, screen capture)",
   "permissions": ["nativeMessaging"],
   "host_permissions": ["<all_urls>"],
