@@ -1,5 +1,6 @@
 // GeckoView Bridge content script.
-// Bridges the page (via CustomEvent) and the extension background (via runtime port).
+// Bridges the page (via window.postMessage, which works across isolated worlds)
+// and the extension background (via runtime port).
 (function () {
   "use strict";
 
@@ -13,8 +14,6 @@
     } catch (e) {}
   }
 
-  // Mark injection on the shared DOM (content scripts run in an isolated world,
-  // so window.* variables are NOT visible to the page).
   function markInjected() {
     if (document.documentElement) {
       document.documentElement.setAttribute("data-gv-bridge-injected", "true");
@@ -34,10 +33,8 @@
   var retryTimer = null;
   var connectAttempts = 0;
 
-  function postToPage(type, detail) {
-    try {
-      window.dispatchEvent(new CustomEvent(type, { detail: detail }));
-    } catch (e) {}
+  function postToPage(obj) {
+    try { window.postMessage(obj, "*"); } catch (e) {}
   }
 
   function connect() {
@@ -52,7 +49,6 @@
       bgPortLocal = browser.runtime.connect({ name: "page" });
     } catch (e) {
       setStage("bg-connect-threw: " + e);
-      try { console.log("[gv-bridge] connect threw: " + e); } catch (e2) {}
       retryTimer = setTimeout(connect, 1000);
       return;
     }
@@ -71,44 +67,52 @@
         try {
           document.documentElement.setAttribute("data-gv-bridge-native", JSON.stringify(msg.data));
         } catch (e) {}
-        return; // heartbeats are internal, don't forward to page
+        return;
       }
       if (msg.event) {
-        postToPage(PAGE_EVENT, msg);
+        postToPage({ type: PAGE_EVENT, event: msg.event, data: msg.data });
       } else {
-        postToPage(PAGE_RESPONSE, msg);
+        postToPage({
+          type: PAGE_RESPONSE,
+          id: msg.id,
+          ok: msg.ok,
+          result: msg.result,
+          error: msg.error
+        });
       }
     });
     bgPort.onDisconnect.addListener(function () {
       setStage("bg-disconnected");
-      try { console.log("[gv-bridge] bg port disconnected"); } catch (e) {}
       bgPort = null;
       retryTimer = setTimeout(connect, 1000);
     });
     setStage("bg-connected-waiting");
-    try { console.log("[gv-bridge] bg port connected"); } catch (e) {}
   }
 
-  window.addEventListener(PAGE_REQUEST, function (e) {
-    var req = e && e.detail;
-    if (!req || !bgPort) {
-      postToPage(PAGE_RESPONSE, {
-        id: req ? req.id : "?",
+  // Listen for page requests via window.postMessage (cross-world safe).
+  window.addEventListener("message", function (e) {
+    var msg = e.data;
+    if (!msg || msg.type !== PAGE_REQUEST) return;
+    setStage("page-msg-received:" + (msg.action || "?"));
+    if (!bgPort) {
+      postToPage({
+        type: PAGE_RESPONSE,
+        id: msg.id,
         ok: false,
-        error: "bridge: bg port not connected (stage=" +
-          (document.documentElement && document.documentElement.getAttribute("data-gv-bridge-stage")) + ")"
+        error: "bg port not connected"
       });
       return;
     }
     try {
       bgPort.postMessage({
-        id: req.id,
-        action: req.action,
-        params: req.params || {}
+        id: msg.id,
+        action: msg.action,
+        params: msg.params || {}
       });
     } catch (err) {
-      postToPage(PAGE_RESPONSE, {
-        id: req.id,
+      postToPage({
+        type: PAGE_RESPONSE,
+        id: msg.id,
         ok: false,
         error: "bridge: " + err
       });

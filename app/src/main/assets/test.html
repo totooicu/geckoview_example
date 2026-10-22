@@ -164,7 +164,7 @@
   (function () {
     "use strict";
 
-    /* ---------- Bridge client ---------- */
+    /* ---------- Bridge client (window.postMessage for cross-world comms) ---------- */
     window.gvBridge = {
       _pending: new Map(), _seq: 0, _events: {}, ready: false,
       invoke: function (action, params) {
@@ -172,9 +172,7 @@
         return new Promise(function (resolve, reject) {
           var id = 'r' + (++self._seq);
           self._pending.set(id, { resolve: resolve, reject: reject });
-          window.dispatchEvent(new CustomEvent('gv-bridge-request', {
-            detail: { id: id, action: action, params: params || {} }
-          }));
+          window.postMessage({ type: 'gv-bridge-request', id: id, action: action, params: params || {} }, '*');
           setTimeout(function () {
             var p = self._pending.get(id);
             if (p) { self._pending.delete(id); p.reject(new Error('超时')); }
@@ -188,18 +186,18 @@
         (this._events[event] || []).forEach(function (cb) { cb(data); });
       }
     };
-    window.addEventListener('gv-bridge-response', function (e) {
-      var m = e.detail;
-      if (!m) return;
-      var p = window.gvBridge._pending.get(m.id);
-      if (p) {
-        window.gvBridge._pending.delete(m.id);
-        m.ok ? p.resolve(m.result) : p.reject(new Error(m.error));
+    window.addEventListener('message', function (e) {
+      var m = e.data;
+      if (!m || !m.type) return;
+      if (m.type === 'gv-bridge-response') {
+        var p = window.gvBridge._pending.get(m.id);
+        if (p) {
+          window.gvBridge._pending.delete(m.id);
+          m.ok ? p.resolve(m.result) : p.reject(new Error(m.error));
+        }
+      } else if (m.type === 'gv-bridge-event') {
+        if (m.event) window.gvBridge._fire(m.event, m.data);
       }
-    });
-    window.addEventListener('gv-bridge-event', function (e) {
-      var m = e.detail;
-      if (m && m.event) window.gvBridge._fire(m.event, m.data);
     });
 
     function base64(s) { return btoa(unescape(encodeURIComponent(s))); }
