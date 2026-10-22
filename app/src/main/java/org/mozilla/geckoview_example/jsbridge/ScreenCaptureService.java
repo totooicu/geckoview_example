@@ -9,17 +9,20 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.util.Log;
 import android.view.Display;
@@ -88,6 +91,9 @@ public class ScreenCaptureService extends Service {
   private boolean mMuxerStarted = false;
   private MediaProjectionManager mProjectionManager;
 
+  /** MediaStore output handle (API 29+); null on API 26-28 (file path output). */
+  @Nullable private Uri mOutUri;
+  @Nullable private ParcelFileDescriptor mPfd;
   private String mOutPath = "";
   private String mDisplayName = "";
 
@@ -111,9 +117,22 @@ public class ScreenCaptureService extends Service {
     }
     if (ACTION_START.equals(action)) {
       int resultCode = intent.getIntExtra("resultCode", 0);
-      Intent data = intent.getParcelableExtra("data");
+      Intent data;
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        data = intent.getParcelableExtra("data", Intent.class);
+      } else {
+        data = intent.getParcelableExtra("data");
+      }
       String name = intent.getStringExtra("name");
-      startCapture(resultCode, data, name);
+      // Defensive guard: any uncaught exception in a foreground service kills the
+      // whole process ("三方应用异常"). Report and stop gracefully instead.
+      try {
+        startCapture(resultCode, data, name);
+      } catch (Exception e) {
+        Log.e(LOGTAG, "startCapture failed", e);
+        notifyError("录屏服务异常: " + e.getMessage());
+        stopSelf();
+      }
     }
     return START_NOT_STICKY;
   }
@@ -126,14 +145,23 @@ public class ScreenCaptureService extends Service {
     mStopping.set(false);
     mDisplayName = name != null && !name.isEmpty() ? name : "capture_" + System.currentTimeMillis() + ".mp4";
 
-    // Save to public Movies via MediaStore on API 29+, private dir otherwise.
-    String dir = getSaveDir();
-    if (dir == null) {
-      notifyError("无法创建保存目录");
+    // API 34+ (Android 14) rule: a mediaProjection foreground service must call
+    // startForeground() with the mediaProjection type BEFORE getMediaProjection().
+    // Reversed order or a 2-arg startForeground throws SecurityException.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      startForeground(
+          NOTIFICATION_ID,
+          buildNotification(),
+          ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+    } else {
+      startForeground(NOTIFICATION_ID, buildNotification());
+    }
+
+    if (!prepareOutput()) {
+      notifyError("无法创建保存目标");
       stopSelf();
       return;
     }
-    mOutPath = new File(dir, mDisplayName).getAbsolutePath();
 
     mProjection = mProjectionManager.getMediaProjection(resultCode, data);
     if (mProjection == null) {
@@ -142,25 +170,47 @@ public class ScreenCaptureService extends Service {
       return;
     }
 
-    startForeground(NOTIFICATION_ID, buildNotification());
-
     mCodecThread = new HandlerThread("ScreenEncoder");
     mCodecThread.start();
     mCodecHandler = new Handler(mCodecThread.getLooper());
     mCodecHandler.post(() -> startEncoding());
   }
 
-  private String getSaveDir() {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      return Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
-          .getAbsolutePath();
+  /**
+   * Create the MP4 output target:
+   * <ul>
+   *   <li>API 29+: public Movies via MediaStore (no storage permission needed,
+   *       works under scoped storage with targetSdk 30+).</li>
+   *   <li>API 26-28: app-private directory.</li>
+   * </ul>
+   */
+  private boolean prepareOutput() {
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        ContentValues v = new ContentValues();
+        v.put(MediaStore.Video.Media.DISPLAY_NAME, mDisplayName);
+        v.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
+        v.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES);
+        mOutUri = getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v);
+        if (mOutUri == null) {
+          return false;
+        }
+        mPfd = getContentResolver().openFileDescriptor(mOutUri, "rw");
+        if (mPfd == null) {
+          return false;
+        }
+        mOutPath = mOutUri.toString();
+        return true;
+      }
+      File dir = new File(getFilesDir(), "captures");
+      //noinspection ResultOfMethodCallIgnored
+      dir.mkdirs();
+      mOutPath = new File(dir, mDisplayName).getAbsolutePath();
+      return true;
+    } catch (Exception e) {
+      Log.e(LOGTAG, "prepareOutput", e);
+      return false;
     }
-    // API 26-28: fall back to app-private (public dir needs WRITE_EXTERNAL_STORAGE
-    // which is not guaranteed; private keeps the feature functional).
-    File dir = new File(getFilesDir(), "captures");
-    //noinspection ResultOfMethodCallIgnored
-    dir.mkdirs();
-    return dir.getAbsolutePath();
   }
 
   private void startEncoding() {
@@ -227,7 +277,13 @@ public class ScreenCaptureService extends Service {
             public void onOutputFormatChanged(MediaCodec codec, MediaFormat fmt) {
               if (!mMuxerStarted) {
                 try {
-                  mMuxer = new MediaMuxer(mOutPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+                  if (mPfd != null) {
+                    mMuxer =
+                        new MediaMuxer(
+                            mPfd.getFileDescriptor(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+                  } else {
+                    mMuxer = new MediaMuxer(mOutPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+                  }
                   mTrackIndex = mMuxer.addTrack(fmt);
                   mMuxer.start();
                   mMuxerStarted = true;
@@ -310,7 +366,13 @@ public class ScreenCaptureService extends Service {
         mInputSurface.release();
       }
 
-      long size = new File(mOutPath).length();
+      long size = 0;
+      if (mPfd != null) {
+        long s = mPfd.getStatSize();
+        size = s > 0 ? s : 0;
+      } else {
+        size = new File(mOutPath).length();
+      }
       sRunning = false;
       sCurrentPath = mOutPath;
       Log.i(LOGTAG, "recording finished: " + mOutPath + " " + size + "B");
@@ -335,6 +397,14 @@ public class ScreenCaptureService extends Service {
       }
     } catch (Exception ignored) {
     }
+    try {
+      if (mPfd != null) {
+        mPfd.close();
+        mPfd = null;
+      }
+    } catch (Exception ignored) {
+    }
+    mOutUri = null;
     if (mCodecThread != null) {
       mCodecThread.quitSafely();
       mCodecThread = null;
