@@ -38,6 +38,7 @@ import java.util.Map;
 public class JsBridge implements WebExtension.MessageDelegate, WebExtension.PortDelegate {
   private static final String LOGTAG = "JsBridge";
   private static final String NATIVE_APP = "bridge";
+  private static final String EXTENSION_ID = "bridge@totooicu.local";
   private static final String EXTENSION_URI = "resource://android/assets/webextension/";
 
   /** Permission request codes. */
@@ -69,51 +70,23 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
 
   public void install(GeckoViewActivity activity) {
     final WebExtensionController controller = activity.getGeckoRuntime().getWebExtensionController();
+    // ensureBuiltIn：已安装则直接返回已安装实例，未安装则安装。
+    // 避免每次启动卸载重装导致 setMessageDelegate 注册时序问题。
     controller
-        .list()
-        .accept(
-            installed -> {
-              // 先卸载所有旧的同名实例（可能残留 MV3 坏实例或脏状态），再全新安装
-              removeOld(controller, installed);
-            },
-            e -> installFresh(controller));
-  }
-
-  private void removeOld(WebExtensionController controller, java.util.List<WebExtension> installed) {
-    removeAll(controller, installed, 0);
-  }
-
-  /** 递归卸载全部已装扩展（App 内只会存在本桥扩展），再全新安装避免脏状态。 */
-  private void removeAll(
-      WebExtensionController controller, java.util.List<WebExtension> installed, int index) {
-    if (index >= installed.size()) {
-      installFresh(controller);
-      return;
-    }
-    controller.uninstall(installed.get(index)).accept(
-        unused -> removeAll(controller, installed, index + 1),
-        e -> removeAll(controller, installed, index + 1));
-  }
-
-  private void installFresh(WebExtensionController controller) {
-    // 官方标准方式：installBuiltIn 从 resource:// 目录打包安装。
-    // 之前失败是因为 manifest 的 id 写在顶层（被 Gecko 忽略），现已移到 applications.gecko.id。
-    controller
-        .installBuiltIn(EXTENSION_URI)
+        .ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)
         .accept(
             extension -> {
               mExtension = extension;
               extension.setMessageDelegate(this, NATIVE_APP);
-              Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
-              toast("桥扩展已安装 v1.0.6");
-              // 页面可能先于扩展加载完成，刷新一次让 content script 注入
+              Log.i(LOGTAG, "Bridge extension ensured: " + extension.id);
+              toast("桥扩展已安装 v1.0.7");
               final GeckoViewActivity act = mActivity.get();
               if (act != null) {
                 act.reloadCurrentPage();
               }
             },
             e -> {
-              Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
+              Log.e(LOGTAG, "Bridge extension ENSURE FAILED: " + e.getMessage(), e);
               showInstallError(e);
             });
   }
@@ -169,7 +142,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
           } catch (Exception ignored) {
           }
           new android.app.AlertDialog.Builder(a)
-              .setTitle("桥扩展安装失败 v1.0.6（完整错误）")
+              .setTitle("桥扩展安装失败 v1.0.7（完整错误）")
               .setMessage(text + "\n\n[错误全文已复制到剪贴板，直接粘贴即可]")
               .setPositiveButton("知道了", null)
               .show();
