@@ -474,8 +474,6 @@ public class GeckoViewActivity extends AppCompatActivity
   private static GeckoRuntime sGeckoRuntime;
 
   /** Local HTTP server serving assets/test.html on 127.0.0.1 (started in onCreate). */
-  @Nullable private static org.mozilla.geckoview_example.jsbridge.LocalPageServer sPageServer;
-
   @Nullable private JsBridge mJsBridge;
 
   /** @return the shared GeckoRuntime instance (created lazily in onCreate). */
@@ -1101,9 +1099,6 @@ public class GeckoViewActivity extends AppCompatActivity
     // Native bridge: install the bridge WebExtension and attach the port delegate.
     mJsBridge = new JsBridge(this);
     mJsBridge.install(this);
-    if (sPageServer == null) {
-      sPageServer = org.mozilla.geckoview_example.jsbridge.LocalPageServer.start(this);
-    }
 
     sExtensionManager.setExtensionDelegate(this);
 
@@ -2966,16 +2961,6 @@ public class GeckoViewActivity extends AppCompatActivity
       Log.d(
           LOGTAG,
           "onLoadError=" + uri + " error category=" + error.category + " error=" + error.code);
-
-      // 在线测试页加载失败（如无网络）时回退到本地 127.0.0.1 页
-      if (uri != null && uri.startsWith("https://totooicu.github.io/")) {
-        String local =
-            sPageServer != null ? sPageServer.getBaseUrl() + "test.html" : null;
-        if (local != null) {
-          Log.i(LOGTAG, "online page failed, falling back to " + local);
-          return GeckoResult.fromValue(local);
-        }
-      }
 
       return GeckoResult.fromValue("data:text/html," + createErrorPage(error.category, error.code));
     }
