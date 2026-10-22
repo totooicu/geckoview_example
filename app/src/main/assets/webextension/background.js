@@ -11,13 +11,16 @@
     try {
       nativePort = browser.runtime.connectNative("bridge");
     } catch (e) {
+      console.log("[gv-bridge] connectNative failed: " + e);
       setTimeout(connectNative, 1000);
       return;
     }
     if (!nativePort) {
+      console.log("[gv-bridge] connectNative returned null");
       setTimeout(connectNative, 1000);
       return;
     }
+    console.log("[gv-bridge] native port connected");
     nativePort.onMessage.addListener(function (msg) {
       // native -> all pages
       for (var p of pagePorts) {

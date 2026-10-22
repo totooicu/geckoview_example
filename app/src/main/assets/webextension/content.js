@@ -8,6 +8,14 @@
 (function () {
   "use strict";
 
+  // Diagnostic: visible to the page so the test page can report injection status.
+  window.__gvBridgeInjected = true;
+  try {
+    console.log("[gv-bridge] content script injected");
+  } catch (e) {
+    /* ignore */
+  }
+
   var PAGE_REQUEST = "gv-bridge-request";
   var PAGE_RESPONSE = "gv-bridge-response";
   var PAGE_EVENT = "gv-bridge-event";

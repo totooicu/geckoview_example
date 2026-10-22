@@ -226,19 +226,22 @@
     var bridgeStatus = document.getElementById('bridge-status');
     document.getElementById('btn-bridge').addEventListener('click', function () {
       bridgeStatus.className = 'status';
-      bridgeStatus.textContent = '检测中…';
+      bridgeDiag();
+    });
+    function bridgeDiag() {
+      var injected = window.__gvBridgeInjected === true;
+      var msg = 'content script 注入：' + (injected ? '✓ 已注入' : '✗ 未注入') + ' | ';
       window.gvBridge.invoke('ping', {})
         .then(function (r) {
           window.gvBridge.ready = true;
-          log(bridgeStatus, '桥已连接 ✓ ' + JSON.stringify(r), 'ok');
+          log(bridgeStatus, msg + '桥已连接 ✓ ' + JSON.stringify(r), 'ok');
         })
         .catch(function (err) {
-          log(bridgeStatus, '桥未连接：' + err.message + '（需在 APK 内运行）', 'err');
+          log(bridgeStatus, msg + '桥未连接：' + err.message +
+            (injected ? '（注入成功但原生链路未通，看 App 弹出的 Toast）' : '（扩展未注入页面，看 App 弹出的 Toast 安装结果）'), 'err');
         });
-    });
-    setTimeout(function () {
-      window.gvBridge.invoke('ping', {}).then(function () { window.gvBridge.ready = true; }).catch(function () {});
-    }, 400);
+    }
+    setTimeout(bridgeDiag, 600);
 
     /* ---------- 麦克风 ---------- */
     var stream = null, audioCtx = null, rafId = null;

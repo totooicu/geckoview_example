@@ -74,8 +74,20 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
               mExtension = extension;
               extension.setMessageDelegate(this, NATIVE_APP);
               Log.i(LOGTAG, "Bridge extension installed: " + extension.id);
+              toast("桥扩展已安装");
             },
-            e -> Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e));
+            e -> {
+              Log.e(LOGTAG, "Bridge extension INSTALL FAILED: " + e.getMessage(), e);
+              toast("桥扩展安装失败: " + e.getMessage());
+            });
+  }
+
+  private void toast(final String text) {
+    final GeckoViewActivity a = mActivity.get();
+    if (a == null) {
+      return;
+    }
+    mMainHandler.post(() -> android.widget.Toast.makeText(a, text, android.widget.Toast.LENGTH_LONG).show());
   }
 
   @Override
@@ -83,6 +95,7 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
     Log.i(LOGTAG, "Bridge port connected");
     mPort = port;
     port.setDelegate(this);
+    toast("原生桥已连接");
   }
 
   @Override
@@ -111,7 +124,6 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
       mPort = null;
     }
   }
-
   /* ----------------------------------------------------------------------------
    * Routing
    * -------------------------------------------------------------------------- */
