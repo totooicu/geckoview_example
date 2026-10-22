@@ -232,7 +232,8 @@
       var de = document.documentElement;
       var injected = de && de.getAttribute('data-gv-bridge-injected') === 'true';
       var stage = de ? (de.getAttribute('data-gv-bridge-stage') || '(none)') : '(none)';
-      var msg = '注入：' + (injected ? '✓' : '✗') + ' | 链路阶段：' + stage + ' | ';
+      var native = de ? (de.getAttribute('data-gv-bridge-native') || '(no heartbeat)') : '(none)';
+      var msg = '注入：' + (injected ? '✓' : '✗') + ' | 阶段：' + stage + ' | native：' + native + ' | ';
       window.gvBridge.invoke('ping', {})
         .then(function (r) {
           window.gvBridge.ready = true;

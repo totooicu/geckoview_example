@@ -67,6 +67,14 @@
     bgPort.onMessage.addListener(function (msg) {
       setStage("bg-message-received");
       if (!msg) return;
+      if (msg.event === "bg-heartbeat" && msg.data) {
+        try {
+          var d = msg.data;
+          document.documentElement.setAttribute("data-gv-bridge-native",
+            "connected=" + d.nativeConnected + " attempts=" + d.nativeAttempts + " lastError=" + d.nativeLastError);
+        } catch (e) {}
+        return; // heartbeats are internal, don't forward to page
+      }
       if (msg.event) {
         postToPage(PAGE_EVENT, msg);
       } else {
