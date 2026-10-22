@@ -2061,6 +2061,11 @@ public class GeckoViewActivity extends AppCompatActivity
               new GeckoSession.Loader()
                   .uri(uri.toString())
                   .flags(GeckoSession.LOAD_FLAGS_EXTERNAL));
+    } else {
+      // 无外部 URL 时默认加载本地测试页
+      mTabSessionManager
+          .getCurrentSession()
+          .load(new GeckoSession.Loader().uri("file:///android_asset/test.html"));
     }
   }
 

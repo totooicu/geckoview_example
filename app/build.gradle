@@ -1,0 +1,57 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = 'org.mozilla.geckoview_example'
+    compileSdk {
+        version = release(37) { minorApiLevel = 2 }
+    }
+
+    defaultConfig {
+        applicationId "org.mozilla.geckoview_example"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "0.1.0"
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    // By default the android plugins ignores folders that start with `_`, but
+    // we need those in web extensions.
+    // See also:
+    //  - https://issuetracker.google.com/issues/36911326
+    //  - https://stackoverflow.com/questions/9206117/how-to-workaround-autoomitting-fiiles-folders-starting-with-underscore-in
+    androidResources {
+        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        noCompress 'ja'
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+}
+
+dependencies {
+    // GeckoView 引擎（Mozilla Maven，nightly 通道，与 main 分支 example 源码同步）
+    implementation "org.mozilla.geckoview:geckoview-nightly:160.0.20261021205324"
+
+    implementation 'androidx.annotation:annotation:1.8.2'
+    implementation 'androidx.annotation:annotation-experimental:1.4.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.collection:collection:1.4.4'
+    implementation 'androidx.constraintlayout:constraintlayout:2.2.0'
+    implementation 'androidx.core:core:1.15.0'
+    implementation 'androidx.lifecycle:lifecycle-common:2.8.7'
+    implementation 'androidx.preference:preference:1.2.1'
+    implementation 'com.google.android.material:material:1.12.0'
+}
