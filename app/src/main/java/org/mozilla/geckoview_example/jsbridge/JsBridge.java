@@ -78,8 +78,9 @@ public class JsBridge implements WebExtension.MessageDelegate, WebExtension.Port
             extension -> {
               mExtension = extension;
               extension.setMessageDelegate(this, NATIVE_APP);
-              Log.i(LOGTAG, "Bridge extension ensured: " + extension.id);
-              toast("桥扩展已安装 v1.0.7");
+              String eid = extension.id == null ? "NULL!" : extension.id;
+              Log.i(LOGTAG, "Bridge extension ensured: id=" + eid);
+              toast("桥扩展 v1.0.7 id=" + eid);
               final GeckoViewActivity act = mActivity.get();
               if (act != null) {
                 act.reloadCurrentPage();
