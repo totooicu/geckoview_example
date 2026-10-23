@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
 import android.util.Log;
@@ -43,7 +44,10 @@ public class WebViewActivity extends AppCompatActivity {
   private static final String LOGTAG = "WebViewActivity";
 
   public static final String DEFAULT_URL =
-      "https://totooicu.github.io/geckoview_example/test.html";
+      "https://totooicu.github.io/DatingRecord/";
+
+  /** Only this host may be loaded; any other link is blocked (no external nav). */
+  public static final String ALLOWED_HOST = "totooicu.github.io";
 
   /** Pending WebRTC PermissionRequest awaiting a runtime permission grant. */
   private static final Map<Integer, PermissionRequest> sPendingMediaPerms = new HashMap<>();
@@ -108,6 +112,7 @@ public class WebViewActivity extends AppCompatActivity {
           @Override
           public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
             super.onPageStarted(view, url, favicon);
+            mUrlBar.setText(url);
             injectAdapter(view);
           }
 
@@ -119,8 +124,15 @@ public class WebViewActivity extends AppCompatActivity {
 
           @Override
           public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-            // Stay inside the shell; navigation happens in the same WebView.
-            return false;
+            // Lock navigation to our own host: only totooicu.github.io may load,
+            // everything else (external links, other schemes) is blocked.
+            Uri u = request.getUrl();
+            String host = u != null ? u.getHost() : null;
+            if (host != null && ALLOWED_HOST.equals(host)) {
+              return false; // allow in-site navigation
+            }
+            Log.i(LOGTAG, "blocked external navigation to: " + (u != null ? u.toString() : "?"));
+            return true; // block
           }
         });
 
@@ -171,24 +183,25 @@ public class WebViewActivity extends AppCompatActivity {
 
     mUrlBar = new EditText(this);
     mUrlBar.setSingleLine(true);
-    mUrlBar.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+    mUrlBar.setInputType(InputType.TYPE_NULL);
     mUrlBar.setTextSize(14);
-    mUrlBar.setHint("输入网址");
+    mUrlBar.setEnabled(false); // 地址写死，用户不可修改
     mUrlBar.setText(DEFAULT_URL);
 
-    Button go = new Button(this);
-    go.setText("打开");
-    go.setTextSize(14);
-    go.setOnClickListener(v -> {
-      String url = mUrlBar.getText().toString().trim();
-      loadUrl(url.isEmpty() ? DEFAULT_URL : url);
+    Button reload = new Button(this);
+    reload.setText("刷新");
+    reload.setTextSize(14);
+    reload.setOnClickListener(v -> {
+      if (mWebView != null) {
+        mWebView.reload();
+      }
     });
 
     bar.addView(
         mUrlBar,
         new LinearLayout.LayoutParams(0, dp(42), 1f));
     bar.addView(
-        go,
+        reload,
         new LinearLayout.LayoutParams(dp(64), dp(42)));
 
     mWebView = new WebView(this);
@@ -203,8 +216,11 @@ public class WebViewActivity extends AppCompatActivity {
   }
 
   private void loadUrl(String url) {
-    if (!url.startsWith("http://") && !url.startsWith("https://")) {
-      url = "https://" + url;
+    Uri u = Uri.parse(url);
+    String host = u.getHost();
+    if (host == null || !ALLOWED_HOST.equals(host)) {
+      Log.w(LOGTAG, "loadUrl blocked (outside allowed host): " + url);
+      return;
     }
     mUrlBar.setText(url);
     mWebView.loadUrl(url);
