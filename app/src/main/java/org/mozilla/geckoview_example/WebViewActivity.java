@@ -27,6 +27,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
 import org.mozilla.geckoview_example.jsbridge.JsBridge;
+import org.mozilla.geckoview_example.jsbridge.OfflineCache;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -62,6 +63,8 @@ public class WebViewActivity extends AppCompatActivity {
 
   private WebView mWebView;
   private JsBridge mJsBridge;
+  private OfflineCache mOfflineCache;
+  private boolean mNeedSnapshot = false;
   /** Pending file-chooser callback from <input type="file">. */
   @Nullable private ValueCallback<Uri[]> mFilePathCallback;
 
@@ -105,7 +108,8 @@ public class WebViewActivity extends AppCompatActivity {
     WebSettings s = mWebView.getSettings();
     s.setJavaScriptEnabled(true);
     s.setDomStorageEnabled(true);
-    s.setAllowFileAccess(false);
+    // Needed to render the local offline snapshot from file://.
+    s.setAllowFileAccess(true);
     s.setMediaPlaybackRequiresUserGesture(false);
     // Mixed content: our own pages are https; keep default (blocked) for safety.
 
@@ -121,13 +125,22 @@ public class WebViewActivity extends AppCompatActivity {
           public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
             injectAdapter(view);
+            // First-ever online visit: snapshot the site in the background so the
+            // next launch opens instantly from local.
+            if (mNeedSnapshot) {
+              mNeedSnapshot = false;
+              captureFirstSnapshot();
+            }
           }
 
           @Override
           public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-            // Lock navigation to our own host: only totooicu.github.io may load,
-            // everything else (external links, other schemes) is blocked.
+            // Local snapshot navigation (file://) is allowed; online navigation is
+            // locked to our own host; everything else is blocked.
             Uri u = request.getUrl();
+            if (u != null && "file".equalsIgnoreCase(u.getScheme())) {
+              return false; // allow local snapshot navigation
+            }
             String host = u != null ? u.getHost() : null;
             if (host != null && ALLOWED_HOST.equals(host)) {
               return false; // allow in-site navigation
@@ -195,7 +208,55 @@ public class WebViewActivity extends AppCompatActivity {
     mWebView.addJavascriptInterface(mJsBridge, "AndroidBridge");
     mJsBridge.attach(mWebView);
 
-    loadUrl(DEFAULT_URL);
+    mOfflineCache = new OfflineCache(this, DEFAULT_URL, ALLOWED_HOST);
+    if (mOfflineCache.hasSnapshot()) {
+      // Fast path: render the local snapshot now, check version in background.
+      loadLocalSnapshot();
+      checkVersionInBackground(false);
+    } else {
+      // First run: open online, snapshot it after the page finishes.
+      mNeedSnapshot = true;
+      loadUrl(DEFAULT_URL);
+    }
+  }
+
+  /** Render the local snapshot instantly (no network wait). */
+  private void loadLocalSnapshot() {
+    mWebView.loadUrl(mOfflineCache.getIndexFileUrl());
+  }
+
+  private void captureFirstSnapshot() {
+    Toast.makeText(this, "首次打开，正在保存网站到本地…", Toast.LENGTH_SHORT).show();
+    mOfflineCache.refreshSnapshotAsync(
+        (updated, version, error) -> {
+          if (updated) {
+            Toast.makeText(
+                this,
+                "网站已保存到本地，下次打开秒开（版本 " + version + "）",
+                Toast.LENGTH_LONG)
+                .show();
+          } else {
+            Toast.makeText(
+                this, "保存网站失败：" + (error == null ? "未知错误" : error), Toast.LENGTH_LONG)
+                .show();
+          }
+        });
+  }
+
+  private void checkVersionInBackground(boolean firstRun) {
+    mOfflineCache.checkAndUpdateAsync(
+        (updated, version, error) -> {
+          if (updated) {
+            Toast.makeText(
+                this, "检测到新版本 " + version + "，已更新", Toast.LENGTH_LONG).show();
+            // The user may be staring at the old local snapshot; reload it.
+            if (mWebView != null && mOfflineCache.hasSnapshot()) {
+              loadLocalSnapshot();
+            }
+          } else if (error != null && firstRun) {
+            Toast.makeText(this, error, Toast.LENGTH_SHORT).show();
+          }
+        });
   }
 
   /* ----------------------------------------------------------------------------
@@ -360,6 +421,9 @@ public class WebViewActivity extends AppCompatActivity {
 
   @Override
   public void onDestroy() {
+    if (mOfflineCache != null) {
+      mOfflineCache.shutdown();
+    }
     mJsBridge.onDestroy();
     if (mWebView != null) {
       mWebView.destroy();
