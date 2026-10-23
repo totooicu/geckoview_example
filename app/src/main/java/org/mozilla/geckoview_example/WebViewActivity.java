@@ -214,7 +214,7 @@ public class WebViewActivity extends AppCompatActivity {
     root.addView(
         spacer,
         new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(45)));
 
     mWebView = new WebView(this);
     mWebView.setBackgroundColor(Color.WHITE);
