@@ -2,6 +2,8 @@ package org.mozilla.geckoview_example;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
@@ -12,6 +14,7 @@ import android.view.Gravity;
 import android.view.ViewGroup;
 import android.webkit.GeolocationPermissions;
 import android.webkit.PermissionRequest;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -23,6 +26,7 @@ import android.widget.LinearLayout;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
@@ -58,10 +62,13 @@ public class WebViewActivity extends AppCompatActivity {
 
   private static final int PERM_MEDIA_BASE = 2001;
   private static final int PERM_GEO = 2002;
+  private static final int REQ_FILE_CHOOSER = 4001;
 
   private WebView mWebView;
   private EditText mUrlBar;
   private JsBridge mJsBridge;
+  /** Pending file-chooser callback from <input type="file">. */
+  @Nullable private ValueCallback<Uri[]> mFilePathCallback;
 
   /**
    * Adapter script: registers the page-facing callback and forwards the page's
@@ -147,6 +154,38 @@ public class WebViewActivity extends AppCompatActivity {
           public void onGeolocationPermissionsShowPrompt(
               String origin, GeolocationPermissions.Callback callback) {
             handleGeolocation(origin, callback);
+          }
+
+          @Override
+          public boolean onShowFileChooser(
+              WebView webView,
+              ValueCallback<Uri[]> filePathCallback,
+              FileChooserParams fileChooserParams) {
+            // Cancel any pending callback first.
+            if (mFilePathCallback != null) {
+              mFilePathCallback.onReceiveValue(null);
+              mFilePathCallback = null;
+            }
+            mFilePathCallback = filePathCallback;
+            Intent intent;
+            try {
+              intent = fileChooserParams.createIntent();
+            } catch (ActivityNotFoundException e) {
+              mFilePathCallback = null;
+              return false;
+            }
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            if (fileChooserParams.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) {
+              intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            }
+            try {
+              startActivityForResult(intent, REQ_FILE_CHOOSER);
+            } catch (ActivityNotFoundException e) {
+              mFilePathCallback = null;
+              Toast.makeText(WebViewActivity.this, "没有可用的文件选择器", Toast.LENGTH_SHORT).show();
+              return false;
+            }
+            return true;
           }
 
           @Override
@@ -323,6 +362,28 @@ public class WebViewActivity extends AppCompatActivity {
   @Override
   public void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
     super.onActivityResult(requestCode, resultCode, data);
+
+    // File chooser result for <input type="file">.
+    if (requestCode == REQ_FILE_CHOOSER) {
+      if (mFilePathCallback != null) {
+        Uri[] results = null;
+        if (resultCode == Activity.RESULT_OK && data != null) {
+          if (data.getClipData() != null) {
+            int count = data.getClipData().getItemCount();
+            results = new Uri[count];
+            for (int i = 0; i < count; i++) {
+              results[i] = data.getClipData().getItemAt(i).getUri();
+            }
+          } else if (data.getDataString() != null) {
+            results = new Uri[] {Uri.parse(data.getDataString())};
+          }
+        }
+        mFilePathCallback.onReceiveValue(results);
+        mFilePathCallback = null;
+      }
+      return;
+    }
+
     mJsBridge.onActivityResult(requestCode, resultCode, data);
   }
 
