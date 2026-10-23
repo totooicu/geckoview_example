@@ -8,9 +8,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
-import android.text.InputType;
 import android.util.Log;
-import android.view.Gravity;
 import android.view.ViewGroup;
 import android.webkit.GeolocationPermissions;
 import android.webkit.PermissionRequest;
@@ -20,8 +18,6 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Toast;
 
@@ -65,7 +61,6 @@ public class WebViewActivity extends AppCompatActivity {
   private static final int REQ_FILE_CHOOSER = 4001;
 
   private WebView mWebView;
-  private EditText mUrlBar;
   private JsBridge mJsBridge;
   /** Pending file-chooser callback from <input type="file">. */
   @Nullable private ValueCallback<Uri[]> mFilePathCallback;
@@ -119,7 +114,6 @@ public class WebViewActivity extends AppCompatActivity {
           @Override
           public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
             super.onPageStarted(view, url, favicon);
-            mUrlBar.setText(url);
             injectAdapter(view);
           }
 
@@ -209,49 +203,10 @@ public class WebViewActivity extends AppCompatActivity {
    * -------------------------------------------------------------------------- */
 
   private void buildUi() {
-    int dp = (int) (getResources().getDisplayMetrics().density);
-
-    LinearLayout root = new LinearLayout(this);
-    root.setOrientation(LinearLayout.VERTICAL);
-
-    LinearLayout bar = new LinearLayout(this);
-    bar.setOrientation(LinearLayout.HORIZONTAL);
-    bar.setGravity(Gravity.CENTER_VERTICAL);
-    bar.setPadding(dp(8), dp(6), dp(8), dp(6));
-    bar.setBackgroundColor(Color.parseColor("#f3f4f6"));
-
-    mUrlBar = new EditText(this);
-    mUrlBar.setSingleLine(true);
-    mUrlBar.setInputType(InputType.TYPE_NULL);
-    mUrlBar.setTextSize(14);
-    mUrlBar.setEnabled(false); // 地址写死，用户不可修改
-    mUrlBar.setText(DEFAULT_URL);
-
-    Button reload = new Button(this);
-    reload.setText("刷新");
-    reload.setTextSize(14);
-    reload.setOnClickListener(v -> {
-      if (mWebView != null) {
-        mWebView.reload();
-      }
-    });
-
-    bar.addView(
-        mUrlBar,
-        new LinearLayout.LayoutParams(0, dp(42), 1f));
-    bar.addView(
-        reload,
-        new LinearLayout.LayoutParams(dp(64), dp(42)));
-
+    // Fullscreen shell: no address bar, no buttons — the URL is hard-coded.
     mWebView = new WebView(this);
     mWebView.setBackgroundColor(Color.WHITE);
-
-    root.addView(bar, new LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-    root.addView(mWebView, new LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-    setContentView(root);
+    setContentView(mWebView);
   }
 
   private void loadUrl(String url) {
@@ -261,7 +216,6 @@ public class WebViewActivity extends AppCompatActivity {
       Log.w(LOGTAG, "loadUrl blocked (outside allowed host): " + url);
       return;
     }
-    mUrlBar.setText(url);
     mWebView.loadUrl(url);
   }
 
@@ -404,9 +358,5 @@ public class WebViewActivity extends AppCompatActivity {
       return;
     }
     super.onBackPressed();
-  }
-
-  private int dp(int v) {
-    return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
   }
 }
