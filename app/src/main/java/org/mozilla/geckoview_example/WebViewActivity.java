@@ -203,10 +203,27 @@ public class WebViewActivity extends AppCompatActivity {
    * -------------------------------------------------------------------------- */
 
   private void buildUi() {
-    // Fullscreen shell: no address bar, no buttons — the URL is hard-coded.
+    // Fullscreen shell with a top spacer matching the old address-bar height
+    // (6dp padding + 42dp control + 6dp padding = 54dp) so content is not
+    // hidden behind the status bar.
+    LinearLayout root = new LinearLayout(this);
+    root.setOrientation(LinearLayout.VERTICAL);
+
+    android.view.View spacer = new android.view.View(this);
+    spacer.setBackgroundColor(Color.parseColor("#f3f4f6"));
+    root.addView(
+        spacer,
+        new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+
     mWebView = new WebView(this);
     mWebView.setBackgroundColor(Color.WHITE);
-    setContentView(mWebView);
+    root.addView(
+        mWebView,
+        new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+    setContentView(root);
   }
 
   private void loadUrl(String url) {
@@ -358,5 +375,9 @@ public class WebViewActivity extends AppCompatActivity {
       return;
     }
     super.onBackPressed();
+  }
+
+  private int dp(int v) {
+    return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
   }
 }
