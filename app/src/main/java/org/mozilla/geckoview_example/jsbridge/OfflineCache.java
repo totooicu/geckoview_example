@@ -3,6 +3,7 @@ package org.mozilla.geckoview_example.jsbridge;
 import android.content.Context;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -31,18 +32,34 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Offline snapshot + version-check cache.
+ * Offline snapshot + two-level version update.
  *
  * <p>First visit downloads the page and its same-host resources (css/js/img/fonts,
  * plus {@code url()} refs inside CSS) into the app-private directory as a local
  * snapshot. Later launches render the snapshot instantly and check the remote
- * version endpoint in the background; only when the version differs is the new
- * copy downloaded (into a temp dir) and atomically swapped in.</p>
+ * version endpoint in the background.</p>
  *
- * <p>Version endpoint convention: {@code <pageUrl>version.json} returning
- * {@code {"version":"x.y.z"}}. If the endpoint is missing/unreachable the check is
- * skipped (local snapshot stays), so a 404 from a site that has no version file
- * degrades to "keep local".</p>
+ * <p>Version endpoint convention: {@code <pageUrl>version.json}:</p>
+ * <pre>
+ * {
+ *   "version": "2026-10-24",          // overall version (any comparable string)
+ *   "link": "https://.../index.html", // (optional) entry link
+ *   "subversion": [                   // per-file versions
+ *     {"version": "2026-10-24", "link": "https://.../app.js"},
+ *     {"version": "2026-10-23", "link": "https://.../style.css"}
+ *   ]
+ * }
+ * </pre>
+ *
+ * <p>Update policy:
+ * <ul>
+ *   <li>overall {@code version} differs → full re-download of every resource;</li>
+ *   <li>overall version equal, but some {@code subversion} entry changed →
+ *       download only that file (the local file name is derived from the URL
+ *       hash, so an unchanged URL maps to the same file name and is just
+ *       overwritten);</li>
+ *   <li>endpoint unreachable/empty → keep the local snapshot, retry next launch.</li>
+ * </ul>
  */
 public class OfflineCache {
   private static final String LOGTAG = "OfflineCache";
@@ -90,16 +107,6 @@ public class OfflineCache {
     return new File(mRoot, INDEX_FILE).getAbsolutePath();
   }
 
-  public String getLocalVersion() {
-    try {
-      JSONObject o = readJson(new File(mRoot, MANIFEST_FILE));
-      return o.optString("version", "");
-    } catch (Exception e) {
-      return "";
-    }
-  }
-
-  /** Render the snapshot immediately; the page itself references local files. */
   public String getIndexFileUrl() {
     return "file://" + getIndexPath();
   }
@@ -109,37 +116,70 @@ public class OfflineCache {
    * -------------------------------------------------------------------------- */
 
   public interface UpdateListener {
-    /** Called on UI thread. updated=true when a new snapshot replaced the old one. */
+    /** Called on UI thread. updated=true when something changed locally. */
     void onUpdateResult(boolean updated, String newVersion, String error);
   }
 
-  /** Check remote version; if different, download & atomically swap. */
+  /** Remote version.json config. */
+  private static class VersionConfig {
+    String version = "";
+    final List<SubFile> subs = new ArrayList<>();
+  }
+
+  private static class SubFile {
+    String version = "";
+    String link = "";
+  }
+
+  /** Check remote version; full re-download or incremental file update. */
   public void checkAndUpdateAsync(UpdateListener listener) {
     mExecutor.execute(() -> {
       String error = null;
       boolean updated = false;
       String newVersion = null;
       try {
-        String remote = fetchVersion();
-        String local = getLocalVersion();
+        VersionConfig remote = fetchConfig();
         if (remote == null) {
-          // Version endpoint unreachable: keep local, try again next launch.
           Log.i(LOGTAG, "version check skipped (endpoint unavailable)");
           error = "版本接口不可用，保留本地";
-        } else if (remote.isEmpty()) {
-          // Endpoint returned nothing useful: keep local.
+        } else if (remote.version.isEmpty()) {
           Log.i(LOGTAG, "version check skipped (empty response)");
           error = "版本接口无有效内容，保留本地";
-        } else if (remote.equals(local)) {
-          Log.i(LOGTAG, "version unchanged: " + remote);
         } else {
-          Log.i(LOGTAG, "new version " + remote + " (local " + local + ") - downloading");
-          if (fetchAndStore()) {
-            updated = true;
-            newVersion = remote;
-            Log.i(LOGTAG, "snapshot updated to " + remote);
+          VersionConfig local = readLocalConfig();
+          if (!remote.version.equals(local.version)) {
+            // Overall version changed -> full re-download.
+            Log.i(LOGTAG, "overall version " + local.version + " -> " + remote.version + " (full)");
+            if (fetchAndStore(remote)) {
+              updated = true;
+              newVersion = remote.version;
+              Log.i(LOGTAG, "full snapshot updated to " + remote.version);
+            } else {
+              error = "下载新版失败，保留本地";
+            }
           } else {
-            error = "下载新版失败，保留本地";
+            // Same overall version -> update only changed sub files.
+            List<SubFile> changed = changedSubs(remote, local);
+            if (changed.isEmpty()) {
+              Log.i(LOGTAG, "version unchanged: " + remote.version);
+            } else {
+              Log.i(LOGTAG, changed.size() + " sub file(s) changed");
+              boolean ok = true;
+              for (SubFile sf : changed) {
+                if (!downloadSubFile(sf)) {
+                  ok = false;
+                  Log.w(LOGTAG, "sub file download failed: " + sf.link);
+                }
+              }
+              if (ok) {
+                writeLocalConfig(remote);
+                updated = true;
+                newVersion = remote.version + " (+" + changed.size() + "文件)";
+                Log.i(LOGTAG, "incremental update done: " + changed.size() + " file(s)");
+              } else {
+                error = "增量下载部分失败，保留本地";
+              }
+            }
           }
         }
       } catch (Exception e) {
@@ -153,38 +193,6 @@ public class OfflineCache {
     });
   }
 
-  /**
-   * Download the page + same-host resources into a temp dir and atomically
-   * replace the current snapshot. Returns true on success.
-   */
-  public boolean fetchAndStore() {
-    try {
-      deleteDir(mTmp);
-      if (!mTmp.mkdirs() && !mTmp.isDirectory()) {
-        return false;
-      }
-      Snapshot s = Snapshot.download(mPageUrl, mAllowedHost, mTmp);
-      s.writeIndex();
-      s.writeManifest();
-
-      // Atomic swap: cur -> old, tmp -> cur, delete old.
-      deleteDir(mOld);
-      if (mRoot.exists() && !mRoot.renameTo(mOld)) {
-        Log.w(LOGTAG, "cannot rename current snapshot to old");
-      }
-      if (!mTmp.renameTo(mRoot)) {
-        Log.e(LOGTAG, "rename tmp -> root failed");
-        return false;
-      }
-      deleteDir(mOld);
-      return true;
-    } catch (Exception e) {
-      Log.e(LOGTAG, "fetchAndStore failed", e);
-      deleteDir(mTmp);
-      return false;
-    }
-  }
-
   /** Full refresh regardless of version (used for the first-ever snapshot). */
   public void refreshSnapshotAsync(UpdateListener listener) {
     mExecutor.execute(() -> {
@@ -192,10 +200,10 @@ public class OfflineCache {
       boolean updated = false;
       String version = null;
       try {
-        String v = fetchVersion();
-        if (fetchAndStore()) {
+        VersionConfig remote = fetchConfig(); // may be null if no version.json yet
+        if (fetchAndStore(remote)) {
           updated = true;
-          version = (v == null || v.isEmpty()) ? "?" : v;
+          version = remote == null || remote.version.isEmpty() ? "?" : remote.version;
         } else {
           error = "保存网站失败";
         }
@@ -209,7 +217,7 @@ public class OfflineCache {
     });
   }
 
-  private String fetchVersion() throws IOException {
+  private VersionConfig fetchConfig() throws IOException {
     HttpURLConnection c = open(getVersionUrl(), "GET");
     try {
       int code = c.getResponseCode();
@@ -217,14 +225,194 @@ public class OfflineCache {
         return null;
       }
       String body = new String(readBody(c), StandardCharsets.UTF_8).trim();
+      VersionConfig cfg = new VersionConfig();
       try {
         JSONObject o = new JSONObject(body);
-        return o.optString("version", "");
+        cfg.version = o.optString("version", "");
+        JSONArray arr = o.optJSONArray("subversion");
+        if (arr != null) {
+          for (int i = 0; i < arr.length(); i++) {
+            JSONObject e = arr.optJSONObject(i);
+            if (e == null) continue;
+            SubFile sf = new SubFile();
+            sf.version = e.optString("version", "");
+            String link = e.optString("link", "");
+            // Normalize relative links against the page URL.
+            try {
+              URL base = new URL(mPageUrl);
+              URL u = new URL(base, link);
+              sf.link = u.toString();
+            } catch (Exception ex) {
+              sf.link = link;
+            }
+            if (!sf.link.isEmpty()) {
+              cfg.subs.add(sf);
+            }
+          }
+        }
       } catch (Exception je) {
-        return body;
+        // Not JSON: treat the raw body as the overall version (plain-text endpoint).
+        cfg.version = body;
       }
+      return cfg;
     } finally {
       c.disconnect();
+    }
+  }
+
+  private VersionConfig readLocalConfig() {
+    VersionConfig cfg = new VersionConfig();
+    try {
+      String text = readTextFile(new File(mRoot, MANIFEST_FILE));
+      JSONObject o = new JSONObject(text);
+      cfg.version = o.optString("version", "");
+      JSONArray arr = o.optJSONArray("subversion");
+      if (arr != null) {
+        for (int i = 0; i < arr.length(); i++) {
+          JSONObject e = arr.optJSONObject(i);
+          if (e == null) continue;
+          SubFile sf = new SubFile();
+          sf.version = e.optString("version", "");
+          sf.link = e.optString("link", "");
+          if (!sf.link.isEmpty()) {
+            cfg.subs.add(sf);
+          }
+        }
+      }
+    } catch (Exception e) {
+      Log.w(LOGTAG, "readLocalConfig", e);
+    }
+    return cfg;
+  }
+
+  private void writeLocalConfig(VersionConfig cfg) throws IOException {
+    try {
+      JSONObject o = new JSONObject();
+      o.put("version", cfg.version);
+      o.put("savedAt", System.currentTimeMillis());
+      JSONArray arr = new JSONArray();
+      for (SubFile sf : cfg.subs) {
+        JSONObject e = new JSONObject();
+        e.put("version", sf.version);
+        e.put("link", sf.link);
+        arr.put(e);
+      }
+      o.put("subversion", arr);
+      writeTextFile(new File(mRoot, MANIFEST_FILE), o.toString());
+    } catch (org.json.JSONException e) {
+      throw new IOException("manifest", e);
+    }
+  }
+
+  /** Subs present remotely but missing/changed locally. */
+  private List<SubFile> changedSubs(VersionConfig remote, VersionConfig local) {
+    List<SubFile> changed = new ArrayList<>();
+    for (SubFile r : remote.subs) {
+      boolean found = false;
+      for (SubFile l : local.subs) {
+        if (r.link.equals(l.link)) {
+          found = true;
+          if (!r.version.equals(l.version)) {
+            changed.add(r);
+          }
+          break;
+        }
+      }
+      if (!found) {
+        changed.add(r);
+      }
+    }
+    return changed;
+  }
+
+  /** Download a single changed sub file and overwrite its local copy. */
+  private boolean downloadSubFile(SubFile sf) {
+    try {
+      if (!mRoot.exists() && !mRoot.mkdirs()) {
+        return false;
+      }
+      HttpURLConnection c = open(sf.link, "GET");
+      try {
+        int code = c.getResponseCode();
+        if (code != 200) {
+          return false;
+        }
+        String type = c.getContentType();
+        String name = isEntryUrl(sf.link) ? INDEX_FILE : localName(sf.link, type);
+        File f = new File(mRoot, name);
+        try (InputStream in = new BufferedInputStream(c.getInputStream());
+             OutputStream out = new BufferedOutputStream(new FileOutputStream(f))) {
+          long total = 0;
+          byte[] buf = new byte[16384];
+          int n;
+          while ((n = in.read(buf)) > 0) {
+            total += n;
+            if (total > MAX_RESOURCE_BYTES) {
+              throw new IOException("resource too large");
+            }
+            out.write(buf, 0, n);
+          }
+        }
+        Log.i(LOGTAG, "sub file updated: " + sf.link + " -> " + name);
+        return true;
+      } finally {
+        c.disconnect();
+      }
+    } catch (Exception e) {
+      Log.w(LOGTAG, "downloadSubFile failed: " + sf.link, e);
+      return false;
+    }
+  }
+
+  /** True when the link resolves to the entry page itself (must overwrite index.html). */
+  private boolean isEntryUrl(String link) {
+    String base = mPageUrl;
+    if (!base.endsWith("/")) base += "/";
+    String candidate = link;
+    int q = candidate.indexOf('?');
+    if (q >= 0) candidate = candidate.substring(0, q);
+    String noSlash = candidate.endsWith("/") ? candidate.substring(0, candidate.length() - 1) : candidate;
+    String baseNoSlash = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
+    return noSlash.equals(baseNoSlash) || noSlash.equals(baseNoSlash + "/index.html");
+  }
+
+  /**
+   * Download the page + same-host resources into a temp dir and atomically
+   * replace the current snapshot. Writes the local config afterwards.
+   */
+  public boolean fetchAndStore(VersionConfig remote) {
+    try {
+      deleteDir(mTmp);
+      if (!mTmp.mkdirs() && !mTmp.isDirectory()) {
+        return false;
+      }
+      Snapshot s = Snapshot.download(mPageUrl, mAllowedHost, mTmp);
+      s.writeIndex();
+
+      // Atomic swap: cur -> old, tmp -> cur, delete old.
+      deleteDir(mOld);
+      if (mRoot.exists() && !mRoot.renameTo(mOld)) {
+        Log.w(LOGTAG, "cannot rename current snapshot to old");
+      }
+      if (!mTmp.renameTo(mRoot)) {
+        Log.e(LOGTAG, "rename tmp -> root failed");
+        return false;
+      }
+      deleteDir(mOld);
+
+      // Persist the config: prefer version.json values, fall back to Last-Modified.
+      VersionConfig cfg = new VersionConfig();
+      cfg.version =
+          (remote != null && !remote.version.isEmpty()) ? remote.version : s.version;
+      if (remote != null) {
+        cfg.subs.addAll(remote.subs);
+      }
+      writeLocalConfig(cfg);
+      return true;
+    } catch (Exception e) {
+      Log.e(LOGTAG, "fetchAndStore failed", e);
+      deleteDir(mTmp);
+      return false;
     }
   }
 
@@ -239,7 +427,7 @@ public class OfflineCache {
 
   private static class Snapshot {
     String html;
-    final String version;
+    final String version; // Last-Modified / ETag fallback
     final File dir;
     final Map<String, String> urlToLocal = new HashMap<>(); // absolute url -> relative file name
     final Set<String> pending = new HashSet<>();
@@ -440,60 +628,6 @@ public class OfflineCache {
       }
     }
 
-    private String localName(String urlStr, String contentType) {
-      String hash;
-      try {
-        MessageDigest md = MessageDigest.getInstance("SHA-1");
-        byte[] d = md.digest(urlStr.getBytes(StandardCharsets.UTF_8));
-        StringBuilder hb = new StringBuilder();
-        for (int i = 0; i < 8; i++) {
-          hb.append(String.format(Locale.US, "%02x", d[i]));
-        }
-        hash = hb.toString();
-      } catch (Exception e) {
-        hash = String.valueOf(Math.abs(urlStr.hashCode()));
-      }
-      return hash + extFor(contentType, urlStr);
-    }
-
-    private String extFor(String contentType, String urlStr) {
-      if (contentType != null) {
-        String ct = contentType.toLowerCase(Locale.US);
-        if (ct.contains("text/css")) return ".css";
-        if (ct.contains("javascript")) return ".js";
-        if (ct.contains("text/html")) return ".html";
-        if (ct.contains("image/png")) return ".png";
-        if (ct.contains("image/jpeg")) return ".jpg";
-        if (ct.contains("image/gif")) return ".gif";
-        if (ct.contains("image/svg")) return ".svg";
-        if (ct.contains("image/webp")) return ".webp";
-        if (ct.contains("application/json")) return ".json";
-        if (ct.contains("font/woff2") || ct.contains("woff2")) return ".woff2";
-        if (ct.contains("font/woff") || ct.contains("woff")) return ".woff";
-        if (ct.contains("octet-stream")) {
-          String p = pathOf(urlStr).toLowerCase(Locale.US);
-          if (p.endsWith(".woff2")) return ".woff2";
-          if (p.endsWith(".woff")) return ".woff";
-          if (p.endsWith(".ttf")) return ".ttf";
-        }
-      }
-      String p = pathOf(urlStr).toLowerCase(Locale.US);
-      int dot = p.lastIndexOf('.');
-      if (dot >= 0) {
-        String ext = p.substring(dot);
-        if (ext.matches("\\.[a-z0-9]{2,5}")) return ext;
-      }
-      return ".bin";
-    }
-
-    private static String pathOf(String urlStr) {
-      try {
-        return new URL(urlStr).getPath();
-      } catch (Exception e) {
-        return urlStr;
-      }
-    }
-
     private static boolean isSkippableRef(String v) {
       if (v == null || v.isEmpty()) return true;
       String t = v.trim().toLowerCase(Locale.US);
@@ -508,22 +642,66 @@ public class OfflineCache {
     void writeIndex() throws IOException {
       writeTextFile(new File(dir, INDEX_FILE), html);
     }
-
-    void writeManifest() throws IOException {
-      try {
-        JSONObject o = new JSONObject();
-        o.put("version", version);
-        o.put("savedAt", System.currentTimeMillis());
-        writeTextFile(new File(dir, MANIFEST_FILE), o.toString());
-      } catch (org.json.JSONException e) {
-        throw new IOException("manifest", e);
-      }
-    }
   }
 
   /* ----------------------------------------------------------------------------
    * Helpers
    * -------------------------------------------------------------------------- */
+
+  /** Local file name for a resource: hash of the absolute URL + extension. */
+  private static String localName(String urlStr, String contentType) {
+    String hash;
+    try {
+      MessageDigest md = MessageDigest.getInstance("SHA-1");
+      byte[] d = md.digest(urlStr.getBytes(StandardCharsets.UTF_8));
+      StringBuilder hb = new StringBuilder();
+      for (int i = 0; i < 8; i++) {
+        hb.append(String.format(Locale.US, "%02x", d[i]));
+      }
+      hash = hb.toString();
+    } catch (Exception e) {
+      hash = String.valueOf(Math.abs(urlStr.hashCode()));
+    }
+    return hash + extFor(contentType, urlStr);
+  }
+
+  private static String extFor(String contentType, String urlStr) {
+    if (contentType != null) {
+      String ct = contentType.toLowerCase(Locale.US);
+      if (ct.contains("text/css")) return ".css";
+      if (ct.contains("javascript")) return ".js";
+      if (ct.contains("text/html")) return ".html";
+      if (ct.contains("image/png")) return ".png";
+      if (ct.contains("image/jpeg")) return ".jpg";
+      if (ct.contains("image/gif")) return ".gif";
+      if (ct.contains("image/svg")) return ".svg";
+      if (ct.contains("image/webp")) return ".webp";
+      if (ct.contains("application/json")) return ".json";
+      if (ct.contains("font/woff2") || ct.contains("woff2")) return ".woff2";
+      if (ct.contains("font/woff") || ct.contains("woff")) return ".woff";
+      if (ct.contains("octet-stream")) {
+        String p = pathOf(urlStr).toLowerCase(Locale.US);
+        if (p.endsWith(".woff2")) return ".woff2";
+        if (p.endsWith(".woff")) return ".woff";
+        if (p.endsWith(".ttf")) return ".ttf";
+      }
+    }
+    String p = pathOf(urlStr).toLowerCase(Locale.US);
+    int dot = p.lastIndexOf('.');
+    if (dot >= 0) {
+      String ext = p.substring(dot);
+      if (ext.matches("\\.[a-z0-9]{2,5}")) return ext;
+    }
+    return ".bin";
+  }
+
+  private static String pathOf(String urlStr) {
+    try {
+      return new URL(urlStr).getPath();
+    } catch (Exception e) {
+      return urlStr;
+    }
+  }
 
   private static HttpURLConnection open(String url, String method) throws IOException {
     HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
@@ -551,10 +729,6 @@ public class OfflineCache {
       } catch (IOException ignored) {
       }
     }
-  }
-
-  private static JSONObject readJson(File f) throws Exception {
-    return new JSONObject(readTextFile(f));
   }
 
   private static String readTextFile(File f) throws IOException {
