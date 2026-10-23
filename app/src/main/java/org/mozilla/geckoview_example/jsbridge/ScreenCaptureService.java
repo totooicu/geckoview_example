@@ -356,9 +356,8 @@ public class ScreenCaptureService extends Service {
   }
 
   private void finishEncoding() {
-    if (mStopping.getAndSet(true)) {
-      return;
-    }
+    // NOTE: stopCapture() already set mStopping=true and guarantees this runs
+    // exactly once; do NOT re-check here or the teardown will be skipped.
     try {
       if (mProjection != null) {
         mProjection.stop();
