@@ -22,6 +22,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.util.Log;
@@ -96,6 +97,7 @@ public class ScreenCaptureService extends Service {
   @Nullable private ParcelFileDescriptor mPfd;
   private String mOutPath = "";
   private String mDisplayName = "";
+  private final Handler mMainHandler = new Handler(Looper.getMainLooper());
 
   @Override
   public void onCreate() {
@@ -169,6 +171,23 @@ public class ScreenCaptureService extends Service {
       stopSelf();
       return;
     }
+
+    // API 34+ (Android 14): a MediaProjection.Callback MUST be registered before
+    // createVirtualDisplay(), otherwise the system throws:
+    // "Must register a callback before starting capture, to manage resources in
+    // response to MediaProjection states."
+    mProjection.registerCallback(
+        new MediaProjection.Callback() {
+          @Override
+          public void onStop() {
+            Log.i(LOGTAG, "MediaProjection stopped by system");
+            // User revoked / system stopped the projection: tear down gracefully.
+            if (!mStopping.get()) {
+              stopCapture();
+            }
+          }
+        },
+        mMainHandler);
 
     mCodecThread = new HandlerThread("ScreenEncoder");
     mCodecThread.start();
