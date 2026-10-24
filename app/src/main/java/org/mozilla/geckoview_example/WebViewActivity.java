@@ -60,11 +60,25 @@ public class WebViewActivity extends AppCompatActivity {
   private static final int PERM_MEDIA_BASE = 2001;
   private static final int PERM_GEO = 2002;
   private static final int REQ_FILE_CHOOSER = 4001;
+  private static final long LOCAL_LOAD_TIMEOUT_MS = 15000;
+
+  private final android.os.Handler mHandler = new android.os.Handler();
+  private Runnable mLocalWatchdogRunnable;
 
   private WebView mWebView;
   private JsBridge mJsBridge;
   private OfflineCache mOfflineCache;
   private boolean mNeedSnapshot = false;
+  private boolean mFallbackTriggered = false;
+  private boolean mLocalLoadPending = false;
+  private final Runnable mLocalWatchdog =
+      () -> {
+        // Local snapshot did not finish loading in time: fall back to online.
+        if (mLocalLoadPending && !mFallbackTriggered) {
+          Log.w(LOGTAG, "local snapshot load timed out, falling back to online");
+          fallbackToOnline("本地加载超时，已切换在线");
+        }
+      };
   /** Pending file-chooser callback from <input type="file">. */
   @Nullable private ValueCallback<Uri[]> mFilePathCallback;
 
@@ -119,17 +133,44 @@ public class WebViewActivity extends AppCompatActivity {
           public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
             super.onPageStarted(view, url, favicon);
             injectAdapter(view);
+            if (url != null && url.startsWith("file://")) {
+              mLocalLoadPending = true;
+            }
           }
 
           @Override
           public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
             injectAdapter(view);
+            if (url != null && url.startsWith("file://")) {
+              // Local snapshot rendered: cancel the watchdog.
+              mLocalLoadPending = false;
+              if (mLocalWatchdogRunnable != null) {
+                mHandler.removeCallbacks(mLocalWatchdogRunnable);
+              }
+            }
             // First-ever online visit: snapshot the site in the background so the
             // next launch opens instantly from local.
             if (mNeedSnapshot) {
               mNeedSnapshot = false;
               captureFirstSnapshot();
+            }
+          }
+
+          @Override
+          public void onReceivedError(
+              WebView view,
+              android.webkit.WebResourceRequest request,
+              android.webkit.WebResourceError error) {
+            super.onReceivedError(view, request, error);
+            // If the local snapshot itself fails to load (missing/corrupt files),
+            // fall back to online instead of leaving a dead white screen.
+            if (request != null && request.isForMainFrame()
+                && request.getUrl() != null
+                && "file".equalsIgnoreCase(request.getUrl().getScheme())
+                && !mFallbackTriggered) {
+              Log.w(LOGTAG, "local snapshot load error, falling back to online");
+              fallbackToOnline("本地文件异常，已切换在线");
             }
           }
 
@@ -220,9 +261,35 @@ public class WebViewActivity extends AppCompatActivity {
     }
   }
 
-  /** Render the local snapshot instantly (no network wait). */
+  /** Render the local snapshot instantly (no network wait), with a timeout watchdog. */
   private void loadLocalSnapshot() {
+    mLocalLoadPending = true;
+    mFallbackTriggered = false;
+    if (mLocalWatchdogRunnable != null) {
+      mHandler.removeCallbacks(mLocalWatchdogRunnable);
+    }
+    mLocalWatchdogRunnable = mLocalWatchdog;
+    mHandler.postDelayed(mLocalWatchdogRunnable, LOCAL_LOAD_TIMEOUT_MS);
     mWebView.loadUrl(mOfflineCache.getIndexFileUrl());
+  }
+
+  /** Broken snapshot / local timeout: clear it and open online instead. */
+  private void fallbackToOnline(String reason) {
+    if (mFallbackTriggered) {
+      return;
+    }
+    mFallbackTriggered = true;
+    mLocalLoadPending = false;
+    if (mLocalWatchdogRunnable != null) {
+      mHandler.removeCallbacks(mLocalWatchdogRunnable);
+    }
+    if (mOfflineCache != null && mOfflineCache.hasSnapshot()) {
+      // A snapshot that cannot render is worse than none: drop it so the next
+      // launch re-snapshots from the fresh online version.
+      mOfflineCache.clear();
+    }
+    Toast.makeText(this, reason, Toast.LENGTH_SHORT).show();
+    loadUrl(DEFAULT_URL);
   }
 
   private void captureFirstSnapshot() {
@@ -421,6 +488,9 @@ public class WebViewActivity extends AppCompatActivity {
 
   @Override
   public void onDestroy() {
+    if (mLocalWatchdogRunnable != null) {
+      mHandler.removeCallbacks(mLocalWatchdogRunnable);
+    }
     if (mOfflineCache != null) {
       mOfflineCache.shutdown();
     }

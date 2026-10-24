@@ -100,7 +100,15 @@ public class OfflineCache {
   }
 
   public boolean hasSnapshot() {
-    return new File(mRoot, INDEX_FILE).exists();
+    // A valid snapshot must have a non-trivial index.html (a corrupted/empty
+    // leftover must not block startup).
+    File f = new File(mRoot, INDEX_FILE);
+    return f.exists() && f.length() > 500;
+  }
+
+  /** Delete the whole snapshot so the next launch re-snapshots online. */
+  public void clear() {
+    deleteDir(mRoot);
   }
 
   public String getIndexPath() {
