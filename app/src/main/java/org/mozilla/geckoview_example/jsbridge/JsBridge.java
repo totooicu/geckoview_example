@@ -94,6 +94,26 @@ public class JsBridge {
     return true;
   }
 
+  /**
+   * Environment identity so the page can tell it is running inside this custom
+   * browser (rather than Chrome / a normal browser) and pick the right API.
+   * The page checks: window.AndroidBridge && AndroidBridge.getEnv().
+   */
+  @JavascriptInterface
+  public String getEnv() {
+    try {
+      JSONObject o = new JSONObject();
+      o.put("app", "DatingRecord");
+      o.put("version", org.mozilla.geckoview_example.BuildConfig.VERSION_NAME);
+      o.put("platform", "android");
+      o.put("isApp", true);
+      o.put("bridge", "jsi-v1");
+      return o.toString();
+    } catch (Exception e) {
+      return "{}";
+    }
+  }
+
   /* ----------------------------------------------------------------------------
    * Routing (same action space as the old WebExtension bridge)
    * -------------------------------------------------------------------------- */

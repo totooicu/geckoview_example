@@ -125,6 +125,11 @@ public class WebViewActivity extends AppCompatActivity {
     // Needed to render the local offline snapshot from file://.
     s.setAllowFileAccess(true);
     s.setMediaPlaybackRequiresUserGesture(false);
+    // Identify this custom browser to the web page via a distinct User-Agent
+    // marker (the page can also call AndroidBridge.getEnv()).
+    s.setUserAgentString(
+        s.getUserAgentString()
+            + " DatingRecord/" + org.mozilla.geckoview_example.BuildConfig.VERSION_NAME);
     // Mixed content: our own pages are https; keep default (blocked) for safety.
 
     mWebView.setWebViewClient(
@@ -143,11 +148,10 @@ public class WebViewActivity extends AppCompatActivity {
             super.onPageFinished(view, url);
             injectAdapter(view);
             if (url != null && url.startsWith("file://")) {
-              // Local snapshot rendered: cancel the watchdog.
-              mLocalLoadPending = false;
-              if (mLocalWatchdogRunnable != null) {
-                mHandler.removeCallbacks(mLocalWatchdogRunnable);
-              }
+              // HTML loaded, but the page JS may still hang or render nothing.
+              // Keep the watchdog armed and verify the rendered content shortly
+              // after; the 15s watchdog remains as the final safety net.
+              mHandler.postDelayed(WebViewActivity.this::verifyLocalSnapshot, 2000);
             }
             // First-ever online visit: snapshot the site in the background so the
             // next launch opens instantly from local.
@@ -271,6 +275,49 @@ public class WebViewActivity extends AppCompatActivity {
     mLocalWatchdogRunnable = mLocalWatchdog;
     mHandler.postDelayed(mLocalWatchdogRunnable, LOCAL_LOAD_TIMEOUT_MS);
     mWebView.loadUrl(mOfflineCache.getIndexFileUrl());
+  }
+
+  /**
+   * After the local snapshot's HTML finished loading, verify the page actually
+   * rendered content (JS may hang on a file:// page). Empty body -> fall back.
+   */
+  private void verifyLocalSnapshot() {
+    if (mFallbackTriggered || mWebView == null || !mLocalLoadPending) {
+      return;
+    }
+    mWebView.evaluateJavascript(
+        "(function(){"
+            + "var b=document.body;"
+            + "var t=b?b.innerText.replace(/\\s+/g,''):'';"
+            + "return {textLen:t.length, childCount:b?b.childElementCount:0};"
+            + "})()",
+        value -> {
+          if (mFallbackTriggered) {
+            return;
+          }
+          try {
+            if (value == null || value.equals("null") || value.isEmpty()) {
+              fallbackToOnline("本地快照不可用，已切换在线");
+              return;
+            }
+            org.json.JSONObject o = new org.json.JSONObject(value);
+            int textLen = o.optInt("textLen", 0);
+            int childCount = o.optInt("childCount", 0);
+            if (textLen == 0 && childCount == 0) {
+              Log.w(LOGTAG, "local snapshot rendered empty, falling back to online");
+              fallbackToOnline("本地快照无内容，已切换在线");
+              return;
+            }
+            // Usable: disarm the watchdog.
+            Log.i(LOGTAG, "local snapshot usable (textLen=" + textLen + ")");
+            mLocalLoadPending = false;
+            if (mLocalWatchdogRunnable != null) {
+              mHandler.removeCallbacks(mLocalWatchdogRunnable);
+            }
+          } catch (Exception e) {
+            Log.w(LOGTAG, "verifyLocalSnapshot parse failed: " + value, e);
+          }
+        });
   }
 
   /** Broken snapshot / local timeout: clear it and open online instead. */
