@@ -143,6 +143,17 @@ geckoview_example/
   提交时于提交信息或 docs 里记一笔。
 - **桥协议不兼容变更 = 网页与壳同版本发布**：DatingRecord 的 Pages 部署与
   APK 分发要互相等齐，别让新壳配旧网页或旧壳配新网页上线。
+- **版本时间写死规则（网页查询用）**：`app/build.gradle` 里
+  `BuildConfig.BUILD_TIME` 必须写死为**该版本提交 GitHub 的时间**（Asia/Shanghai，
+  `yyyy-MM-dd HH:mm`），禁止用 `new Date()` 随构建动态生成——同号重打包会变，
+  网页的版本条就说不清「跑的是哪份代码」。发版流程：push 到 GitHub → 用
+  `curl https://api.github.com/repos/totooicu/geckoview_example/commits/<短哈希>`
+  取提交时间（`commit.committer.date` 转 UTC+8）→ 写进 `BUILD_TIME` 并注释对应
+  提交哈希。`GIT_COMMIT` 由构建时动态取当前 HEAD 短哈希（ProcessBuilder，
+  无 git 的机器为 `"unknown"`，发版必须在有 git 的机构建）。
+- **网页如何获取版本**：页面调 `AndroidBridge.getEnv()`（见 `ADAPTATION_GUIDE.md`
+  §3.1），拿 `version`（versionName）、`builtAt`（写死的提交时间）、
+  `commit`（git 短哈希），版本条显示「壳 1.1.1（10-25 18:10 @ a1b2c3d）」。
 - 发版照 `docs/RELEASE_GUIDE.md` 执行；配对记录的唯一真相源在网页仓库 `RELEASE.md`，
   本仓库那份是镜像，两边同步加行。
 
