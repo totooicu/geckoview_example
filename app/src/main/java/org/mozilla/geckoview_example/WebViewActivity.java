@@ -73,6 +73,9 @@ public class WebViewActivity extends AppCompatActivity {
   private static final int PERM_GEO = 2200;
   private static final int REQ_FILE_CHOOSER = 4001;
 
+  /** 网页定位 Toast 节流时间戳（测试内容）。 */
+  private static long sLastGeoToastAt = 0;
+
   private WebView mWebView;
   private JsBridge mJsBridge;
   /** Pending file-chooser callback from <input type="file">. */
@@ -533,6 +536,12 @@ public class WebViewActivity extends AppCompatActivity {
   }
 
   private void handleGeolocation(String origin, GeolocationPermissions.Callback callback) {
+    // 测试内容：网页使用定位时 Toast 提示（10s 节流，避免刷屏）。
+    long now = System.currentTimeMillis();
+    if (now - sLastGeoToastAt > 10000) {
+      sLastGeoToastAt = now;
+      Toast.makeText(this, "网页正在使用定位功能", Toast.LENGTH_SHORT).show();
+    }
     if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
         == PackageManager.PERMISSION_GRANTED) {
       callback.invoke(origin, true, false);
