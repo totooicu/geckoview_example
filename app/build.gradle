@@ -32,9 +32,9 @@ android {
         versionName "1.1.1"
         // 版本时间：写死为「提交 GitHub 的时间」（Asia/Shanghai），发版流程见
         // CLAUDE.md「版本对齐」：push 到 GitHub 后，把该提交时间更新到这里，
-        // 网页经 getEnv().builtAt 查询，版本条显示「壳 1.1.1（10-25 18:10 @ …）」。
-        // 当前值对应提交 83ae71d（2026-10-25 18:10:48 +08:00）。
-        buildConfigField "String", "BUILD_TIME", "\"2026-10-25 18:10\""
+        // 网页经 getEnv().builtAt 查询，版本条显示「壳 1.1.1（10-25 21:47 @ …）」。
+        // 当前值对应提交 18ad673（2026-10-25 21:47:01 +08:00）。
+        buildConfigField "String", "BUILD_TIME", "\"2026-10-25 21:47\""
         // git 短哈希：构建时动态取当前 HEAD（Gradle 9 移除了 Project.exec，
         // 用 ProcessBuilder；无 git 环境的机器会得到 "unknown"，需在发版机构建）。
         buildConfigField "String", "GIT_COMMIT", "\"${gitCommitShort()}\""
