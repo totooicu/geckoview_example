@@ -2,12 +2,22 @@ package org.mozilla.geckoview_example;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.AppOpsManager;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
 import android.util.Log;
 import android.view.ViewGroup;
 import android.webkit.GeolocationPermissions;
@@ -19,6 +29,8 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -56,8 +68,8 @@ public class WebViewActivity extends AppCompatActivity {
   private static final Map<Integer, String> sPendingGeoOrigins = new HashMap<>();
   private static int sPermSeq = 3001;
 
-  private static final int PERM_MEDIA_BASE = 2001;
-  private static final int PERM_GEO = 2002;
+  private static final int PERM_MEDIA_BASE = 2100;
+  private static final int PERM_GEO = 2200;
   private static final int REQ_FILE_CHOOSER = 4001;
 
   private WebView mWebView;
@@ -252,18 +264,39 @@ public class WebViewActivity extends AppCompatActivity {
   private void handlePermissionRequest(PermissionRequest request) {
     boolean needsAudio = false;
     boolean needsCamera = false;
+    StringBuilder resources = new StringBuilder();
     for (String r : request.getResources()) {
+      if (resources.length() > 0) {
+        resources.append(",");
+      }
+      resources.append(r);
       if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
         needsAudio = true;
       } else if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)) {
         needsCamera = true;
       }
     }
+    Log.i(
+        LOGTAG,
+        "media permission: "
+            + resources
+            + " webview="
+            + webViewVersion()
+            + " recordAudio="
+            + (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED));
     // Deny anything not involving capture (notifications, protected media, ...).
     if (!needsAudio && !needsCamera) {
+      Log.w(LOGTAG, "unsupported permission resources: " + resources);
+      Toast.makeText(this, "桥:未识别权限请求 " + resources, Toast.LENGTH_LONG).show();
       request.deny();
       return;
     }
+    Toast.makeText(
+            this,
+            "桥:页面请求" + (needsAudio ? "麦克风" : "") + (needsCamera ? "摄像头" : "") + "权限",
+            Toast.LENGTH_SHORT)
+        .show();
     final String[] missing = new String[2];
     int n = 0;
     if (needsAudio
@@ -277,7 +310,7 @@ public class WebViewActivity extends AppCompatActivity {
       missing[n++] = Manifest.permission.CAMERA;
     }
     if (n == 0) {
-      request.grant(request.getResources());
+      grantMediaWithSelfCheck(request);
       return;
     }
     String[] perms = new String[n];
@@ -285,6 +318,127 @@ public class WebViewActivity extends AppCompatActivity {
     int code = PERM_MEDIA_BASE + (sPermSeq++ % 100);
     sPendingMediaPerms.put(code, request);
     ActivityCompat.requestPermissions(this, perms, code);
+  }
+
+  /** WebView 内核版本：Chrome 能用、壳里麦克风不行时，先排除内核太旧/被厂商替换 */
+  private static String webViewVersion() {
+    PackageInfo pi = WebView.getCurrentWebViewPackage();
+    return pi == null ? "未知" : pi.packageName + "/" + pi.versionName;
+  }
+
+  /**
+   * 放行网页的采集请求。授权弹窗期间请求可能已经失效（页面切走、重复调用），
+   * grant 会抛 IllegalStateException——宁可提示一句，也不要让壳崩掉。
+   */
+  private void grantMedia(PermissionRequest req) {
+    try {
+      req.grant(req.getResources());
+    } catch (RuntimeException e) {
+      Log.w(LOGTAG, "grant media failed: " + e);
+      Toast.makeText(this, "桥:放行失败 " + e.getMessage(), Toast.LENGTH_LONG).show();
+    }
+  }
+
+  /**
+   * 放行前先做一次原生录音自检（只针对含麦克风的请求）：区分「系统没把麦克风交出来」
+   * 与「WebView 内核的音频路径起不来」——前者能照着改设置解决，后者只能换内核。
+   * 自检只录 0.2 秒且立刻释放，不持有麦克风。
+   */
+  private void grantMediaWithSelfCheck(PermissionRequest req) {
+    boolean audio = false;
+    for (String r : req.getResources()) {
+      if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
+        audio = true;
+        break;
+      }
+    }
+    if (!audio) {
+      grantMedia(req);
+      return;
+    }
+    new Thread(
+            () -> {
+              int op = -1;
+              String report;
+              try {
+                op = MicDiagnostics.audioOpMode(this);
+                report = MicDiagnostics.collect(this);
+              } catch (Throwable e) {
+                Log.w(LOGTAG, "mic self-check failed", e);
+                report = "自检失败：" + e;
+              }
+              final int opMode = op;
+              final String text = report;
+              Log.i(LOGTAG, "mic self-check:\n" + text);
+              runOnUiThread(
+                  () -> {
+                    grantMedia(req);
+                    // 让页面的 getUserMedia 先跑完，再把报告盖上来
+                    mMainHandler.postDelayed(() -> showMicReport(text, opMode), 900);
+                  });
+            },
+            "mic-selfcheck")
+        .start();
+  }
+
+  /** 自检报告弹窗：可选中、可复制，AppOps 被关时给一条去系统设置的直路。 */
+  private void showMicReport(String report, int opMode) {
+    if (isFinishing() || isDestroyed()) {
+      return;
+    }
+    boolean blocked =
+        opMode == AppOpsManager.MODE_IGNORED || opMode == AppOpsManager.MODE_ERRORED;
+    StringBuilder msg = new StringBuilder(report);
+    if (blocked) {
+      msg.append("\n\n系统把本 App 的麦克风关掉了（AppOps=被关掉）：去「设置 → 应用 → ")
+          .append(getString(R.string.app_name))
+          .append(" → 权限 → 麦克风」打开，再回页面重试。");
+    }
+    TextView tv = new TextView(this);
+    int pad = dp(16);
+    tv.setPadding(pad, pad, pad, pad);
+    tv.setTextSize(12);
+    tv.setTextIsSelectable(true);
+    tv.setTypeface(Typeface.MONOSPACE);
+    tv.setText(msg.toString());
+    ScrollView sv = new ScrollView(this);
+    sv.addView(tv);
+
+    AlertDialog.Builder b =
+        new AlertDialog.Builder(this)
+            .setTitle(blocked ? "麦克风被系统挡住了" : "麦克风自检")
+            .setView(sv)
+            .setPositiveButton("知道了", null)
+            .setNeutralButton(
+                "复制", (d, w) -> copyText("麦克风自检", report));
+    if (blocked) {
+      b.setNegativeButton("去设置", (d, w) -> openAppSettings());
+    }
+    b.show();
+  }
+
+  private void copyText(String label, String text) {
+    try {
+      ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+      if (cm != null) {
+        cm.setPrimaryClip(ClipData.newPlainText(label, text));
+        Toast.makeText(this, "已复制，可直接发出来", Toast.LENGTH_SHORT).show();
+      }
+    } catch (Throwable e) {
+      Log.w(LOGTAG, "copy failed", e);
+    }
+  }
+
+  private void openAppSettings() {
+    try {
+      startActivity(
+          new Intent(
+              Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+              Uri.fromParts("package", getPackageName(), null)));
+    } catch (Throwable e) {
+      Log.w(LOGTAG, "open app settings failed", e);
+      Toast.makeText(this, "打不开系统设置页，请手动进设置", Toast.LENGTH_LONG).show();
+    }
   }
 
   private void handleGeolocation(String origin, GeolocationPermissions.Callback callback) {
@@ -316,7 +470,8 @@ public class WebViewActivity extends AppCompatActivity {
     PermissionRequest req = sPendingMediaPerms.remove(requestCode);
     if (req != null) {
       if (granted) {
-        req.grant(req.getResources());
+        Toast.makeText(this, "麦克风/摄像头权限已授予，正在放行", Toast.LENGTH_LONG).show();
+        grantMediaWithSelfCheck(req);
       } else {
         req.deny();
         Toast.makeText(this, "麦克风/摄像头权限被拒绝", Toast.LENGTH_SHORT).show();
