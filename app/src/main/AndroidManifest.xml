@@ -17,9 +17,11 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
+    <!-- 定位权限只服务于两件事：蓝牙扫描（BLUETOOTH_SCAN 未声明 neverForLocation）
+         与网页自己的 navigator.geolocation。壳不再自己采样定位，
+         所以不再申请后台定位（ACCESS_BACKGROUND_LOCATION）。 -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- WebView 里 getUserMedia 录音：部分定制 ROM 缺这条会 AudioRecord 起不来
          （表现为 NotReadableError · Could not start audio source）。普通权限，不弹框 -->
@@ -29,7 +31,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.CREDENTIAL_MANAGER_SET_ORIGIN" />
     <uses-permission android:name="android.permission.CREDENTIAL_MANAGER_QUERY_CANDIDATE_CREDENTIALS" />
@@ -71,11 +72,8 @@
             android:name=".jsbridge.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
-
-        <service
-            android:name=".jsbridge.LocationTrackingService"
-            android:exported="false"
-            android:foregroundServiceType="location" />
+        <!-- LocationTrackingService 已删：壳不参与定位，定位交给网页的
+             navigator.geolocation（见 docs/DEVELOPMENT_GUIDE.md）。 -->
     </application>
 
 </manifest>

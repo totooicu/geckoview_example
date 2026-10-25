@@ -38,6 +38,12 @@ import java.util.Map;
  * calls {@link #invoke(String, String, String)} on the injected object, and the
  * reply is delivered back through {@code window.__gvBridgeCallback(...)} which the
  * adapter forwards to the page with postMessage. The test page needs no changes.</p>
+ *
+ * <p><b>壳不参与定位</b>：<code>location.*</code> 这一族 action 与
+ * <code>LocationTrackingService</code> 前台服务已删除，页面要定位就用 Web 标准
+ * <code>navigator.geolocation</code>（授权由 WebViewActivity 转系统弹窗）。
+ * 老页面若还在调 <code>location.*</code>，这里会回 <code>ok:false / unknown action</code>——
+ * 页面探测到就该立刻退回自己的定时器，而不是继续等壳。留档见 docs/DEVELOPMENT_GUIDE.md。</p>
  */
 public class JsBridge {
   private static final String LOGTAG = "JsBridge";
@@ -45,7 +51,8 @@ public class JsBridge {
   /** Permission request codes. */
   public static final int PERM_BLE = 1001;
   public static final int PERM_FILE = 1002;
-  public static final int PERM_LOCATION = 1003;
+  // 1003 曾是 PERM_LOCATION：location.* 桥与定位前台服务已删除（壳不参与定位），
+  // 这个号空着不复用——老版本发出去的权限请求码不会撞车。
 
   private final WeakReference<Activity> mActivity;
   private final Handler mMainHandler = new Handler(Looper.getMainLooper());
@@ -56,14 +63,12 @@ public class JsBridge {
   private BleManager mBle;
   private FileBridge mFiles;
   private ScreenCaptureManager mScreen;
-  private LocationBridge mLocation;
 
   public JsBridge(Activity activity) {
     mActivity = new WeakReference<>(activity);
     mBle = new BleManager(activity, this);
     mFiles = new FileBridge(activity, this);
     mScreen = new ScreenCaptureManager(activity, this);
-    mLocation = new LocationBridge(activity, this);
   }
 
   /** Called by the hosting activity once the WebView exists. */
@@ -151,8 +156,6 @@ public class JsBridge {
       mFiles.handle(id, action, params, this);
     } else if (action.startsWith("screen.")) {
       mScreen.handle(id, action, params, this);
-    } else if (action.startsWith("location.")) {
-      mLocation.handle(id, action, params, this);
     } else if (action.startsWith("ui.")) {
       handleUi(id, action, params);
     } else {
@@ -343,10 +346,6 @@ public class JsBridge {
 
   public ScreenCaptureManager screen() {
     return mScreen;
-  }
-
-  public LocationBridge location() {
-    return mLocation;
   }
 
   public Activity activity() {

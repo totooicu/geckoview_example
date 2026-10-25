@@ -1,8 +1,14 @@
 # 项目：DatingRecord 安卓壳（geckoview_example）
 
 一句话定位：**DatingRecord 网页应用的原生载体**——GeckoView/WebView 壳 + 原生桥，
-让网页在后台/锁屏下继续定位打点，并提供蓝牙/文件/录屏等网页拿不到的能力。
+提供蓝牙/文件/录屏等网页拿不到的能力，并把 Web 的定位授权转成系统弹窗。
 壳不实现业务，**业务真相永远在网页里**；壳只做「承载、兜底、桥接」三件事。
+
+> **壳不参与定位**（2026-10-25 用户立规，不许回退）：`location.*` 桥、
+> `LocationTrackingService` 前台服务、`dr.autoLocation` 镜像全部删除；
+> 定位由网页用 `navigator.geolocation` 自己取。原因与留档见
+> `docs/DEVELOPMENT_GUIDE.md`：壳里每加一层定位策略（退避/去重/传感器），
+> 就跟网页那半套状态机错拍一次，最后一次是「刷新后卡 8 秒」。
 
 配套关系：网页工程宪法在 DatingRecord 仓库 `CLAUDE.md`，两边铁律同源；
 壳的独有纪律（桥契约、语义对齐、前台服务）以本文件为准。
@@ -21,13 +27,14 @@
 - keystore（`*.jks` / `*.keystore`）、签名密码、`google-services.json` 等一律不入库；
   用户在本地保管，提交信息里可提醒一句。
 - `.gitignore` 目前**没有** keystore 规则——新增签名配置时必须同步补上，别等泄密了才补。
-- 运行时数据（`filesDir/location_log.jsonl`、录屏文件、用户经 `file.*` 选的文件）
+- 运行时数据（录屏文件、用户经 `file.*` 选的文件）
   只在设备上，不进库；APK 里不许预置假定位数据冒充用户记录。
 
 ## 铁律三：桥协议是契约，文档先行，双边同步
 
-- 任何桥 action（`ble.` / `file.` / `screen.` / `location.` / `ui.`）的增改，
+- 任何桥 action（`ble.` / `file.` / `screen.` / `ui.`）的增改，
   **先更新 docs 接口表**（`ADAPTATION_GUIDE.md` §3.2、对应功能的开发文档），再动 Java。
+  （`location.` 已下线，见本文件开头与 `DEVELOPMENT_GUIDE.md`。）
 - 网页（DatingRecord）与原生壳是同一产品的两半：桥变更必须**两边同版本适配**，
   不允许单边上线把另一边摔坏（页面调一个壳里没有的 action = 功能静默死亡）。
 - 新增原生能力的最小改动路径照 `ADAPTATION_GUIDE.md` §6：
@@ -36,12 +43,13 @@
 
 ## 铁律四：与网页语义严格对齐
 
-- 定位三件套——**appendPoint 去重、连续打点策略、rev 语义**——与网页 `locationAuto.ts`
-  一一对应；改原生算法前先读网页实现，**两边不一致就是 bug**。
-- **配置权威在网页**：`localStorage` 的 `dr.autoLocation` 是唯一来源，原生只经
-  SharedPreferences 镜像；不许发明平行配置源，不许让原生配置反过来覆盖网页。
-- 落盘格式（`location_log.jsonl` 每行一个点）是网页 `getHistory` 合并的契约：
-  改格式先改开发文档 §6，并同步网页侧，老数据要能读。
+- **定位不再有「两边各一套」**：壳不采样、不去重、不落盘，网页 `locationAuto.ts` 是
+  定位的唯一实现。以前那套「原生复刻 appendPoint / 连续打点策略 / rev 语义」随
+  `location.*` 一起删掉了——留一份镜像实现，就多一处错拍（最后一次是刷新后卡 8 秒）。
+- **配置权威仍在网页**：`localStorage` 的 `dr.autoLocation` 只是网页自己的存档，
+  壳不再镜像它；不许为了让壳读配置再引入 SharedPreferences 平行配置源。
+- （落盘格式契约已随服务删除作废：`filesDir/location_log.jsonl` 不再产生。
+  真要恢复原生兜底，格式仍照 `DEVELOPMENT_GUIDE.md` §3.6，并以网页侧为准。）
 
 ## 铁律五：一任务一分支，验证通过才合并，main 只许前进
 
@@ -72,13 +80,15 @@
 
 ## 铁律六：前台服务与权限纪律（踩过的坑，不许回退）
 
-- `startForeground` 必须**先于**任何定位/录屏工作（API 29+ 三参带
-  `FOREGROUND_SERVICE_TYPE_LOCATION`）；同录屏规则，见 `ADAPTATION_GUIDE.md` §5.3。
+- `startForeground` 必须**先于**任何录屏工作（API 29+ 三参带
+  `FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION`）；细节见 `ADAPTATION_GUIDE.md` §5.3。
+  （定位前台服务已删，这条只管录屏。）
 - 权限被拒要**降级可解释**：Toast 说明 + 引导系统设置页，不静默失败、不崩溃、不空转。
-- `START_STICKY` 恢复分支（`onStartCommand(intent==null)` 从文件尾恢复
-  lastPoint/rev）必须保持：杀 App 重开要能续记且不重复。
+  网页定位被拒也一样：`handleGeolocation` 走系统弹窗，用户拒了就是拒了，不许偷偷重试。
+- `START_STICKY` 恢复分支现在是录屏服务独有（`ScreenCaptureService`；
+  定位服务的那份已随服务删除）。
 - 返回键转发（`ui.backPressed` → 网页 `ui.finish`/`ui.goBack` 决策 → 3s 超时兜底）
-  的兜底逻辑不许删；退出时录屏要停、定位服务按设计保持。
+  的兜底逻辑不许删；退出时录屏要停（定位服务已经没有了，谈不上「按设计保持」）。
 
 ## 铁律七：写过的工具/脚本/文档不许删，必须留下说明
 
@@ -110,15 +120,12 @@ geckoview_example/
 ├── CLAUDE.md                    本文件（项目约定）
 ├── docs/
 │   ├── ADAPTATION_GUIDE.md      换皮教程 + 桥协议全貌 + 权限坑位（改桥前必读）
-│   ├── DEVELOPMENT_GUIDE.md     长期定位原生兜底服务开发文档（location.* 全貌）
+│   ├── DEVELOPMENT_GUIDE.md     长期定位原生兜底服务的**已下线留档**（location.* 全貌 + 删除原因）
 │   └── RELEASE_GUIDE.md         壳发布手册（版本对齐 / 签名钥匙 / 出包校验 / 回滚）
 ├── app/src/main/java/org/mozilla/geckoview_example/
 │   ├── WebViewActivity.java     主壳：加载页面、注入 ADAPTER_JS、域名锁、权限、返回键
 │   └── jsbridge/
 │       ├── JsBridge.java        桥入口：invoke/action 路由 + respond/emit + getEnv()
-│       ├── LocationBridge.java  location.* 路由 + 权限申请 + 后台权限引导
-│       ├── LocationConfig.java  配置模型 + SharedPreferences 镜像（dr.autoLocation）
-│       ├── LocationTrackingService.java  前台服务：连续打点、appendPoint、JSONL 落盘
 │       ├── BleManager.java      蓝牙 Central/Peripheral
 │       ├── FileBridge.java      文件读写
 │       ├── ScreenCaptureManager.java + ScreenCaptureService.java  录屏
@@ -128,8 +135,9 @@ geckoview_example/
 
 ## 开发流程
 
-1. **动手前先读文档**：桥相关先读 `ADAPTATION_GUIDE.md`（协议全貌），
-   定位相关先读 `DEVELOPMENT_GUIDE.md`（状态机/去重/落盘契约）。
+1. **动手前先读文档**：桥相关先读 `ADAPTATION_GUIDE.md`（协议全貌）；
+   涉及定位先读本文件开头那段「壳不参与定位」——`DEVELOPMENT_GUIDE.md` 是**已下线留档**，
+   不是现行设计。
 2. 顺序固定为 **桥协议/文档 → 原生实现 → 网页适配 → 真机验证**，不可跳步；
    不允许先写 Java 后补协议（那是给后人埋雷）。
 3. 术语照现有文档，不自造同义词：壳 / 桥 / 页面（网页）/ 前台服务 / 兜底 /

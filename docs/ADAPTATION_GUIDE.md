@@ -100,6 +100,8 @@ function getEnv() {
 哪份代码」；`proto` 是桥协议版本：网页用这些数判断能不能配对（网页侧
 `core/compat/pairing.ts` + 适配测试的「版本配对」卡片，发版纪律见网页仓库 `RELEASE.md`）。
 **桥只增不删**——加 `action` 不用升 `proto`，删 `action` 或改参数语义必须升，并且与网页同版本发布。
+（唯一例外已记录在案：删 `location.*` 时**没有**升 `proto`——网页改成「探不到就当壳没这能力」，
+老壳照样能配对；升 `proto` 只会把已发出的 1.1.1 老壳标成不配对，收益为负。见 `DEVELOPMENT_GUIDE.md` §2。）
 
 用途：在本 App 内 → 调用原生桥（蓝牙/文件/录屏）；在普通浏览器 → 用 Web 标准 API（Web Bluetooth、File System Access 等）或提示下载 App。
 
@@ -152,7 +154,12 @@ window.addEventListener('message', (e) => {
 
 > 桥由 App 在 `onPageStarted` / `onPageFinished` 注入适配脚本自动接通，页面无需等待标记，首次调用前 `await bridge('ping')` 即可自检。
 
-> **`location.setConfig` 的权限时序**：`enabled:true` 但缺定位权限时，壳会先弹系统权限申请（与 `location.start` 同一条路径），用户的授权结果决定应答——因此这一次桥调用的 resolve/reject 可能**延迟到权限弹窗有了结果之后**；用户拒绝时回 `ok:false`（不静默跳过），页面应据此降级（如退回页面自己的定时器）。
+> **`location.*` 已下线**：壳不再提供任何定位相关的 action（`location.setConfig` / `start` / `stop`
+> / `status` / `getHistory` / `clearHistory` / `point` / `getFix` 全部删除，前台服务
+> `LocationTrackingService` 与后台定位权限一并移除）。页面要定位就用 Web 标准
+> `navigator.geolocation`，授权走 `onGeolocationPermissionsShowPrompt`（见 §4.4）。
+> 老壳（1.1.1 及更早）里这些 action 还在，**页面必须先探再用**（探 `location.status`，
+> 探不到就当壳没有定位能力），别假设壳一定有。留档见 `DEVELOPMENT_GUIDE.md`。
 
 ### 3.3 常用调用示例
 
@@ -251,14 +258,19 @@ window.addEventListener('message', (e) => {
 
 - **麦克风录音**：网页 `navigator.mediaDevices.getUserMedia({audio:true})` → App 弹系统麦克风授权
 - **摄像头**：`getUserMedia({video:true})` → 弹摄像头授权
-- **定位**：网页 `navigator.geolocation.getCurrentPosition()` → 弹定位授权
+- **定位**：网页 `navigator.geolocation.getCurrentPosition()` → 弹定位授权。
+  **这是壳里唯一的定位通路**：原生 `location.*` 桥已下线（`DEVELOPMENT_GUIDE.md`），
+  壳只负责把 Web 的授权请求转成系统弹窗，不采样、不落盘、不做任何策略。
 - **文件选择**：网页 `<input type="file">` → App 调起系统文件选择器（含多选、MIME 过滤）
 
 ---
 
 ## 5. 权限处理（重点）
 
-### 5.1 Manifest 权限总表（21 个）
+### 5.1 Manifest 权限总表（20 个）
+
+> `location.*` 下线后去掉了 `ACCESS_BACKGROUND_LOCATION` 与 `FOREGROUND_SERVICE_LOCATION`；
+> `ACCESS_COARSE/FINE_LOCATION` 保留——蓝牙扫描和网页定位都还要用它。
 
 | 权限 | 用途 | 备注 |
 |---|---|---|
@@ -267,7 +279,7 @@ window.addEventListener('message', (e) => {
 | `BLUETOOTH_SCAN` | 蓝牙扫描 | API 31+ 运行时 |
 | `BLUETOOTH_CONNECT` | 蓝牙连接 | API 31+ 运行时 |
 | `BLUETOOTH_ADVERTISE` | 蓝牙广播 | API 31+ 运行时 |
-| `ACCESS_COARSE/FINE_LOCATION` | 蓝牙扫描+定位 | 运行时 |
+| `ACCESS_COARSE/FINE_LOCATION` | 蓝牙扫描 + 网页定位（`navigator.geolocation`） | 运行时 |
 | `RECORD_AUDIO` | 麦克风 | 运行时 |
 | `MODIFY_AUDIO_SETTINGS` | WebView 录音的音频模式 | 普通权限；部分定制 ROM 缺它会报 `NotReadableError` |
 | `CAMERA` | 摄像头 | 运行时 |
@@ -284,7 +296,8 @@ window.addEventListener('message', (e) => {
 
 ### 5.2 三类权限的授权时机
 
-1. **桥内权限**（蓝牙、文件、location）：由模块内部在首次调用时申请，页面无需处理，只需处理拒绝回调。
+1. **桥内权限**（蓝牙、文件）：由模块内部在首次调用时申请，页面无需处理，只需处理拒绝回调。
+   （`location.*` 已下线，桥里不再有会自己申请定位权限的模块。）
 2. **Web API 权限**（录音/摄像头/定位）：页面调用 `getUserMedia` / `geolocation` 时，
    `WebChromeClient.onPermissionRequest` / `onGeolocationPermissionsShowPrompt` 自动转成系统弹窗。
    放行是异步的（先系统弹窗，回调里再 `grant()`）：期间页面切走或重复申请会让请求失效，
