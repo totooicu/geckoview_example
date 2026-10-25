@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
@@ -354,6 +355,15 @@ public class WebViewActivity extends AppCompatActivity {
         needsCamera = true;
       }
     }
+    Log.i(
+        LOGTAG,
+        "media permission: "
+            + resources
+            + " webview="
+            + webViewVersion()
+            + " recordAudio="
+            + (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED));
     // Deny anything not involving capture (notifications, protected media, ...).
     if (!needsAudio && !needsCamera) {
       Log.w(LOGTAG, "unsupported permission resources: " + resources);
@@ -379,7 +389,7 @@ public class WebViewActivity extends AppCompatActivity {
       missing[n++] = Manifest.permission.CAMERA;
     }
     if (n == 0) {
-      request.grant(request.getResources());
+      grantMedia(request);
       return;
     }
     String[] perms = new String[n];
@@ -387,6 +397,25 @@ public class WebViewActivity extends AppCompatActivity {
     int code = PERM_MEDIA_BASE + (sPermSeq++ % 100);
     sPendingMediaPerms.put(code, request);
     ActivityCompat.requestPermissions(this, perms, code);
+  }
+
+  /** WebView 内核版本：Chrome 能用、壳里麦克风不行时，先排除内核太旧/被厂商替换 */
+  private static String webViewVersion() {
+    PackageInfo pi = WebView.getCurrentWebViewPackage();
+    return pi == null ? "未知" : pi.packageName + "/" + pi.versionName;
+  }
+
+  /**
+   * 放行网页的采集请求。授权弹窗期间请求可能已经失效（页面切走、重复调用），
+   * grant 会抛 IllegalStateException——宁可提示一句，也不要让壳崩掉。
+   */
+  private void grantMedia(PermissionRequest req) {
+    try {
+      req.grant(req.getResources());
+    } catch (RuntimeException e) {
+      Log.w(LOGTAG, "grant media failed: " + e);
+      Toast.makeText(this, "桥:放行失败 " + e.getMessage(), Toast.LENGTH_LONG).show();
+    }
   }
 
   private void handleGeolocation(String origin, GeolocationPermissions.Callback callback) {
@@ -419,7 +448,7 @@ public class WebViewActivity extends AppCompatActivity {
     if (req != null) {
       if (granted) {
         Toast.makeText(this, "麦克风/摄像头权限已授予，正在放行", Toast.LENGTH_LONG).show();
-        req.grant(req.getResources());
+        grantMedia(req);
       } else {
         req.deny();
         Toast.makeText(this, "麦克风/摄像头权限被拒绝", Toast.LENGTH_SHORT).show();

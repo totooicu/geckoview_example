@@ -237,7 +237,7 @@ window.addEventListener('message', (e) => {
 
 ## 5. 权限处理（重点）
 
-### 5.1 Manifest 权限总表（20 个）
+### 5.1 Manifest 权限总表（21 个）
 
 | 权限 | 用途 | 备注 |
 |---|---|---|
@@ -248,6 +248,7 @@ window.addEventListener('message', (e) => {
 | `BLUETOOTH_ADVERTISE` | 蓝牙广播 | API 31+ 运行时 |
 | `ACCESS_COARSE/FINE_LOCATION` | 蓝牙扫描+定位 | 运行时 |
 | `RECORD_AUDIO` | 麦克风 | 运行时 |
+| `MODIFY_AUDIO_SETTINGS` | WebView 录音的音频模式 | 普通权限；部分定制 ROM 缺它会报 `NotReadableError` |
 | `CAMERA` | 摄像头 | 运行时 |
 | `READ_EXTERNAL_STORAGE` | 兼容旧版读文件 | `maxSdkVersion=32` |
 | `WRITE_EXTERNAL_STORAGE` | 兼容旧版写文件 | `maxSdkVersion=28` |
@@ -265,6 +266,8 @@ window.addEventListener('message', (e) => {
 1. **桥内权限**（蓝牙、文件）：由模块内部在首次调用时申请，页面无需处理，只需处理拒绝回调。
 2. **Web API 权限**（录音/摄像头/定位）：页面调用 `getUserMedia` / `geolocation` 时，
    `WebChromeClient.onPermissionRequest` / `onGeolocationPermissionsShowPrompt` 自动转成系统弹窗。
+   放行是异步的（先系统弹窗，回调里再 `grant()`）：期间页面切走或重复申请会让请求失效，
+   `grant()` 抛 `IllegalStateException`，现在的实现提示「放行失败」而不是让壳崩掉。
 3. **录屏授权**（特殊）：`screen.start` 时调起系统「媒体投影」授权对话框（Android 14+ 会有两次确认）。
 
 ### 5.3 Android 14+ 录屏的三个必踩坑（均已修好，适配时勿回退）
@@ -314,6 +317,7 @@ window.addEventListener('message', (e) => {
 | 录屏点开始没弹授权 | 检查 Manifest 有 `FOREGROUND_SERVICE_MEDIA_PROJECTION`，且 `targetSdk>=34` 时规则见 5.3 |
 | 蓝牙扫描不到设备 | 确认定位已授权（Android 13 以下扫描需定位）、`startScan` 的 timeout 合理 |
 | 录音/定位授权弹窗不出现 | 确认 Manifest 有 `RECORD_AUDIO` / `ACCESS_FINE_LOCATION`，且页面从 https 加载 |
+| 录音报 `NotReadableError`（Could not start audio source） | 权限之外先查两处：① Manifest 有没有 `MODIFY_AUDIO_SETTINGS`（普通权限，不弹框）；② 适配测试「引擎信息」里的 WebView 版本——Chrome 能录、壳里不能录时，优先把「Android System WebView」更新到和 Chrome 同代，厂商替换过的内核常常在这一步出问题 |
 
 ---
 

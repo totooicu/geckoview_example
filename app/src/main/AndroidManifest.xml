@@ -21,6 +21,9 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- WebView 里 getUserMedia 录音：部分定制 ROM 缺这条会 AudioRecord 起不来
+         （表现为 NotReadableError · Could not start audio source）。普通权限，不弹框 -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
