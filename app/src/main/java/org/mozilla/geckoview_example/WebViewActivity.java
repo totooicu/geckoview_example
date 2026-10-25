@@ -56,8 +56,8 @@ public class WebViewActivity extends AppCompatActivity {
   private static final Map<Integer, String> sPendingGeoOrigins = new HashMap<>();
   private static int sPermSeq = 3001;
 
-  private static final int PERM_MEDIA_BASE = 2001;
-  private static final int PERM_GEO = 2002;
+  private static final int PERM_MEDIA_BASE = 2100;
+  private static final int PERM_GEO = 2200;
   private static final int REQ_FILE_CHOOSER = 4001;
 
   private WebView mWebView;
@@ -303,7 +303,12 @@ public class WebViewActivity extends AppCompatActivity {
   private void handlePermissionRequest(PermissionRequest request) {
     boolean needsAudio = false;
     boolean needsCamera = false;
+    StringBuilder resources = new StringBuilder();
     for (String r : request.getResources()) {
+      if (resources.length() > 0) {
+        resources.append(",");
+      }
+      resources.append(r);
       if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
         needsAudio = true;
       } else if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)) {
@@ -312,9 +317,16 @@ public class WebViewActivity extends AppCompatActivity {
     }
     // Deny anything not involving capture (notifications, protected media, ...).
     if (!needsAudio && !needsCamera) {
+      Log.w(LOGTAG, "unsupported permission resources: " + resources);
+      Toast.makeText(this, "桥:未识别权限请求 " + resources, Toast.LENGTH_LONG).show();
       request.deny();
       return;
     }
+    Toast.makeText(
+            this,
+            "桥:页面请求" + (needsAudio ? "麦克风" : "") + (needsCamera ? "摄像头" : "") + "权限",
+            Toast.LENGTH_SHORT)
+        .show();
     final String[] missing = new String[2];
     int n = 0;
     if (needsAudio
@@ -367,6 +379,7 @@ public class WebViewActivity extends AppCompatActivity {
     PermissionRequest req = sPendingMediaPerms.remove(requestCode);
     if (req != null) {
       if (granted) {
+        Toast.makeText(this, "麦克风/摄像头权限已授予，正在放行", Toast.LENGTH_LONG).show();
         req.grant(req.getResources());
       } else {
         req.deny();
