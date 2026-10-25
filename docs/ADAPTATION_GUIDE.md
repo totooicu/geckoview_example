@@ -154,6 +154,31 @@ await bridge('screen.stop');
 await bridge('screen.status');
 ```
 
+### 3.4 返回键转发（ui.*）
+
+壳默认**不直接处理返回键**，而是把按键转给网页决定：
+
+| action / 事件 | 方向 | 说明 |
+|---|---|---|
+| `ui.backPressed`（事件） | 原生→页面 | 用户按返回；data `{atRoot: bool}`（壳的 WebView 导航栈是否在根部，SPA 内部路由仅供参考） |
+| `ui.finish` | 页面→原生 | 网页决定退出 → 壳 `finish()` |
+| `ui.goBack` | 页面→原生 | 网页让壳接管后退 → 壳 `goBack()` |
+
+页面监听示例：
+
+```js
+window.addEventListener('message', (e) => {
+  const m = e.data;
+  if (m?.type === 'gv-bridge-event' && m.event === 'ui.backPressed') {
+    if (router.canGoBack()) { router.back(); return; }   // 页面自己后退
+    if (confirm('确定退出吗？')) bridge('ui.finish');      // 确认退出
+    // 什么都不做 → 壳 3 秒后按 canGoBack ? goBack : finish 兜底
+  }
+});
+```
+
+行为规则：页面加载中（桥未就绪）直接走默认；页面 3 秒内未响应则壳兜底；等待期间再按一次返回直接执行默认行为，返回键永不失效。
+
 ---
 
 ## 4. 原生能力清单

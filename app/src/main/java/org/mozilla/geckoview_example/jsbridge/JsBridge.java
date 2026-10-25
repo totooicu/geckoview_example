@@ -71,6 +71,16 @@ public class JsBridge {
     mWebView = webView;
   }
 
+  /**
+   * Optional callback invoked when the page handles a back press itself
+   * (ui.finish / ui.goBack), so the activity can cancel its back timeout.
+   */
+  @Nullable private Runnable mUiActionHandled;
+
+  public void setUiActionHandled(Runnable r) {
+    mUiActionHandled = r;
+  }
+
   /* ----------------------------------------------------------------------------
    * JS interface (injected as window.AndroidBridge)
    * -------------------------------------------------------------------------- */
@@ -135,8 +145,44 @@ public class JsBridge {
       mScreen.handle(id, action, params, this);
     } else if (action.startsWith("location.")) {
       mLocation.handle(id, action, params, this);
+    } else if (action.startsWith("ui.")) {
+      handleUi(id, action, params);
     } else {
       respond(id, false, null, "unknown action: " + action);
+    }
+  }
+
+  /** UI control actions requested by the page (back handling handoff). */
+  private void handleUi(String id, String action, JSONObject params) {
+    switch (action) {
+      case "ui.finish":
+        // Page decided to leave: cancel the back timeout, then finish the activity.
+        if (mUiActionHandled != null) {
+          mUiActionHandled.run();
+        }
+        Activity a = mActivity.get();
+        if (a != null) {
+          a.finish();
+          respond(id, true, null, null);
+        } else {
+          respond(id, false, null, "activity gone");
+        }
+        break;
+      case "ui.goBack":
+        // Page asked the shell to navigate back: cancel timeout, goBack if possible.
+        if (mUiActionHandled != null) {
+          mUiActionHandled.run();
+        }
+        WebView wv = mWebView;
+        if (wv != null && wv.canGoBack()) {
+          wv.goBack();
+          respond(id, true, null, null);
+        } else {
+          respond(id, true, null, null);
+        }
+        break;
+      default:
+        respond(id, false, null, "unknown ui action: " + action);
     }
   }
 
