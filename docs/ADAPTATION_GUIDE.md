@@ -5,7 +5,7 @@
 > 麦克风录音、定位。
 >
 > 适用工程：`geckoview_example_app/`（GitHub: `git@github.com:totooicu/geckoview_example.git`）
-> 当前版本：v0.2.0（WebView 方案）
+> 当前版本：v0.2.1（WebView 方案）
 
 ---
 
@@ -268,6 +268,10 @@ window.addEventListener('message', (e) => {
    `WebChromeClient.onPermissionRequest` / `onGeolocationPermissionsShowPrompt` 自动转成系统弹窗。
    放行是异步的（先系统弹窗，回调里再 `grant()`）：期间页面切走或重复申请会让请求失效，
    `grant()` 抛 `IllegalStateException`，现在的实现提示「放行失败」而不是让壳崩掉。
+   **放行前壳会先做一次麦克风自检**（`MicDiagnostics`，原生录 0.2 秒后立刻释放），
+   弹窗给出 `RECORD_AUDIO` 权限 / AppOps 状态 / 系统静音开关 / WebView 内核版本 /
+   两路音源的探测结果。页面报 `NotReadableError` 时先看这份报告：原生也录不到 = 系统
+   没把麦克风给这个 App（AppOps 被关，弹窗里有「去设置」）；原生能录 = 内核音频路径的问题。
 3. **录屏授权**（特殊）：`screen.start` 时调起系统「媒体投影」授权对话框（Android 14+ 会有两次确认）。
 
 ### 5.3 Android 14+ 录屏的三个必踩坑（均已修好，适配时勿回退）
@@ -317,7 +321,7 @@ window.addEventListener('message', (e) => {
 | 录屏点开始没弹授权 | 检查 Manifest 有 `FOREGROUND_SERVICE_MEDIA_PROJECTION`，且 `targetSdk>=34` 时规则见 5.3 |
 | 蓝牙扫描不到设备 | 确认定位已授权（Android 13 以下扫描需定位）、`startScan` 的 timeout 合理 |
 | 录音/定位授权弹窗不出现 | 确认 Manifest 有 `RECORD_AUDIO` / `ACCESS_FINE_LOCATION`，且页面从 https 加载 |
-| 录音报 `NotReadableError`（Could not start audio source） | 权限之外先查两处：① Manifest 有没有 `MODIFY_AUDIO_SETTINGS`（普通权限，不弹框）；② 适配测试「引擎信息」里的 WebView 版本——Chrome 能录、壳里不能录时，优先把「Android System WebView」更新到和 Chrome 同代，厂商替换过的内核常常在这一步出问题 |
+| 录音报 `NotReadableError`（Could not start audio source） | 权限之外先查三处：① Manifest 有没有 `MODIFY_AUDIO_SETTINGS`（普通权限，不弹框）；② 壳弹出的「麦克风自检」报告——AppOps 被关就按弹窗「去设置」打开，原生录音也失败说明系统没把麦克风交给 App，与 WebView 无关；③ 原生能录而网页不能录时看 WebView 内核版本（自检里有），Chrome 能录、壳里不能录优先把「Android System WebView」更新到和 Chrome 同代，厂商替换过的内核常常坏在这一步 |
 
 ---
 
