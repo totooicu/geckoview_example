@@ -2,6 +2,22 @@ plugins {
     id 'com.android.application'
 }
 
+/** 打包时的最后一次 git 提交（短哈希）：注入 BuildConfig.GIT_COMMIT，
+ *  getEnv() 报给网页——壳发出去就收不回来，版本条要能说出「跑的是哪份代码」。 */
+def gitCommitShort() {
+    try {
+        def stdout = new ByteArrayOutputStream()
+        project.exec {
+            commandLine = ["git", "rev-parse", "--short", "HEAD"]
+            standardOutput = stdout
+        }
+        def s = stdout.toString("UTF-8").trim()
+        return s ?: "unknown"
+    } catch (Exception ignored) {
+        return "unknown"
+    }
+}
+
 android {
     namespace = 'org.mozilla.geckoview_example'
     compileSdk {
@@ -12,8 +28,8 @@ android {
         applicationId "org.mozilla.geckoview_example"
         minSdk 26
         targetSdk 36
-        versionCode 5
-        versionName "1.1.0"
+        versionCode 6
+        versionName "1.1.1"
     }
 
     buildTypes {
@@ -29,6 +45,16 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+
+    // 构建时间（Asia/Shanghai）与 git 短哈希：每次打包时刻注入 BuildConfig，
+    // getEnv() 报给网页，版本条显示「壳 1.1.1（10-25 17:48 @ a1b2c3d）」。
+    // 同号重打包时 versionName 分不出先后，靠这两个数区分。
+    def gitCommit = gitCommitShort()
+    applicationVariants.configureEach { variant ->
+        variant.buildConfigField "String", "BUILD_TIME",
+                "\"${new Date().format('yyyy-MM-dd HH:mm', TimeZone.getTimeZone('Asia/Shanghai'))}\""
+        variant.buildConfigField "String", "GIT_COMMIT", "\"${gitCommit}\""
     }
 }
 

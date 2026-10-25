@@ -8,7 +8,7 @@
 > 麦克风录音、定位。
 >
 > 适用工程：`geckoview_example_app/`（GitHub: `git@github.com:totooicu/geckoview_example.git`）
-> 当前版本：v1.1.0（WebView 方案）
+> 当前版本：v1.1.1（WebView 方案）
 
 ---
 
@@ -90,10 +90,14 @@ function getEnv() {
   return null; // 普通浏览器（Chrome/微信/...）
 }
 
-// 返回示例：{"app":"DatingRecord","version":"1.0.0","platform":"android","isApp":true,"bridge":"jsi-v1","proto":1}
+// 返回示例：{"app":"DatingRecord","version":"1.0.0","builtAt":"2026-10-25 17:48","commit":"a1b2c3d","platform":"android","isApp":true,"bridge":"jsi-v1","proto":1}
 ```
 
-`version` 是壳版本，`proto` 是桥协议版本：网页用这两个数判断能不能配对（网页侧
+`version` 是壳版本，`builtAt` 是这次构建的打包时间（Asia/Shanghai，`gradle`
+打包时刻注入 `BuildConfig.BUILD_TIME`），`commit` 是打包时的最后一次 git 提交
+（短哈希，注入 `BuildConfig.GIT_COMMIT`）——同号重打包时版本号分不出先后，
+网页的版本条靠这两个数显示「壳 1.1.1（10-25 17:48 @ a1b2c3d）」、说清「跑的是
+哪份代码」；`proto` 是桥协议版本：网页用这些数判断能不能配对（网页侧
 `core/compat/pairing.ts` + 适配测试的「版本配对」卡片，发版纪律见网页仓库 `RELEASE.md`）。
 **桥只增不删**——加 `action` 不用升 `proto`，删 `action` 或改参数语义必须升，并且与网页同版本发布。
 

@@ -17,7 +17,10 @@
 | `proto` | `JsBridge.getEnv()` | 桥协议版本，与网页 `BRIDGE_PROTO` 一致；删 action / 改语义才升 |
 
 `versionName` 还会被拼进 UA（`DatingRecord/1.0.1`），网页据此识别壳版本；`getEnv()` 返回
-`{"app","version","platform","isApp","bridge","proto"}`，网页的「版本配对」卡片读的就是它。
+`{"app","version","builtAt","commit","platform","isApp","bridge","proto"}`，网页的「版本配对」卡片读的就是它。
+`builtAt` 是打包时间、`commit` 是打包时的最后一次 git 提交（短哈希），都由 `app/build.gradle`
+注入 `BuildConfig`：同号重打包时 `versionName` 分不出先后，人物主页 head 上的版本条用它们
+显示「壳 x.y.z（MM-dd HH:mm @ 短哈希）」、说清跑的是哪份代码。
 
 ---
 
