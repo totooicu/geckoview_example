@@ -154,7 +154,9 @@ window.addEventListener('message', (e) => {
 
 > **`location.setConfig` 的权限时序**：`enabled:true` 但缺定位权限时，壳会先弹系统权限申请（与 `location.start` 同一条路径），用户的授权结果决定应答——因此这一次桥调用的 resolve/reject 可能**延迟到权限弹窗有了结果之后**；用户拒绝时回 `ok:false`（不静默跳过），页面应据此降级（如退回页面自己的定时器）。
 
-> **`location.getFix`（手动一次性定位）**：手动「我的位置 / 打点」优先走这条，与连续打点同一个原生 GPS 源（`LocationManager.requestSingleUpdate`），绕开 WebView 拦截的 `navigator.geolocation`（那套在壳里常「申请了定位却回不来坐标」）。成功回 `{lat,lng,accuracy}`（WGS-84 米，页面换算 GCJ-02）；失败回 `ok:false`（权限被拒 / 信号不可用 / 超时）；缺定位权限时同样先弹系统权限申请，拒绝回 `ok:false`；**务必及时应答**，否则页面会卡到自身 9s 超时。详见 `docs/DEVELOPMENT_GUIDE.md` §2。
+> **壳不做定位策略**：`location.*` 只负责「按 `intervalBaseMs` 固定间隔取一次定位 → 存一条 → 推一条 `location.point`」。`thresholdM` / `strategy` / `intervalMaxMs` 照收但一律不使用，去重、退避、什么时候记都由网页决定（见 `docs/DEVELOPMENT_GUIDE.md` §4、§5）。
+>
+> **`location.getFix` 已移除**（v1.1.2）：手动「我的位置 / 打点」直接用 WebView 的 `navigator.geolocation`（壳已开 `WebSettings.setGeolocationEnabled(true)`），页面不要再调这条桥——壳已不认，会回 `unknown location action`。
 
 ### 3.3 常用调用示例
 

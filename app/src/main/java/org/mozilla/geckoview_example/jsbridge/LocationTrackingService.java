@@ -42,22 +42,18 @@ import java.util.List;
  * design: while the page is visible it records via watchPosition itself; once
  * the page cannot run, this service takes over.
  *
- * <p>Sampling strategy mirrors the page (locationAuto.ts, strategy in the pushed
- * config):</p>
- * <ul>
- *   <li>fixed - sample every intervalBaseMs.</li>
- *   <li>backoff - after n consecutive fixes merged into the same point, wait
- *       intervalBaseMs * 2^n, capped at intervalMaxMs (defaults 1s → 64s). A new
- *       point resets n to 0, so moving keeps the 1s cadence.</li>
- * </ul>
+ * <p>采样不含任何策略：按页面给的 intervalBaseMs 固定间隔取一次定位，取到就存
+ * 一条、就推一条 location.point 事件。不去重、不退避、不看位移。</p>
  *
- * <p>Deduplication mirrors the page's appendPoint(): a new fix is compared only
- * with the last recorded point (haversine). Within thresholdM it merges (update
- * ts + accuracy, keep coordinates/note), otherwise it appends a new point. rev
- * increments only on real append/delete. New points persist immediately;
- * time-only refreshes persist at most every FLUSH_MS. Data is stored as JSONL in
- * the app-private files dir, one point per line:
- * {@code {"ts":...,"lat":...,"lng":...,"accuracy":...,"rev":N}}.</p>
+ * <p>为什么不做：去重和退避归网页（locationAuto.ts 的 appendPoint / nextSampleMs）。
+ * 壳里再实现一份，两边状态必然不同步——页面刷新会把自己退避计数清零，壳的服务
+ * 跨刷新活着、计数不清零，于是「刷新前 1s 一个点，刷新后变成 8s 一个点」。
+ * thresholdM / strategy / intervalMaxMs 照收（旧页面会推），但一概不使用。</p>
+ *
+ * <p>数据存 app 私有目录的 JSONL，一行一点：
+ * {@code {"ts":...,"lat":...,"lng":...,"accuracy":...,"rev":N}}，每追加一条
+ * rev+1。location.getHistory 支持可选 since（毫秒），只回比它新的点，
+ * 免得跑久了每次回传全量把桥撑爆。</p>
  */
 public class LocationTrackingService extends Service {
   private static final String LOGTAG = "LocationTrackingService";
@@ -69,21 +65,11 @@ public class LocationTrackingService extends Service {
   private static final int NOTIFICATION_ID = 2002;
   private static final String FILE_NAME = "location_log.jsonl";
 
-  /** Persist throttle for time-only refreshes (page FLUSH_MS = 15000). */
-  private static final long FLUSH_MS = 15000;
-
   /** 定位采集 Toast 节流时间戳（测试内容）。 */
   private static volatile long sLastFixToastAt = 0;
 
-  /** Accelerometer magnitude-change threshold to treat the phone as "moving". */
-  private static final double SENSOR_MOVE_THRESHOLD = 0.4; // m/s^2 change
-  /** How long a detected movement keeps the "moving" flag alive. */
-  private static final long SENSOR_MOVE_WINDOW_MS = 1500;
   /** Location fix watchdog: if no fix arrives within interval+slack, retry. */
   private static final long FIX_WATCHDOG_SLACK_MS = 800;
-
-  /** Exponent clamp for the backoff (2^16 * 1s already far beyond any cap). */
-  private static final int MAX_BACKOFF_N = 16;
 
   /** Bridge-facing listener (set by LocationBridge) for events. */
   public interface Listener {
@@ -135,12 +121,15 @@ public class LocationTrackingService extends Service {
     }
   }
 
-  /** All recorded points for location.getHistory. */
-  public static JSONObject historyJson() {
+  /**
+   * Recorded points for location.getHistory. sinceMs > 0 时只回比它新的点——
+   * 网页把已合并到的时间戳传过来，跑久了也不会每次回传全量。
+   */
+  public static JSONObject historyJson(long sinceMs) {
     JSONObject o = new JSONObject();
     try {
       LocationTrackingService svc = sInstance;
-      JSONArray points = svc != null ? svc.readAllPoints() : new JSONArray();
+      JSONArray points = svc != null ? svc.readAllPoints(sinceMs) : new JSONArray();
       o.put("points", points);
       o.put("rev", sRev);
     } catch (Exception e) {
@@ -184,15 +173,11 @@ public class LocationTrackingService extends Service {
 
   private final Handler mHandler = new Handler(Looper.getMainLooper());
 
-  /** Consecutive fixes merged into the same point; backoff exponent n. */
-  private int mSameCount = 0;
-
   private LocationManager mLocationManager;
   private String mProvider;
 
-  /** Last appended point (dedupe baseline), mirrors page rows[last]. */
+  /** Last appended point (only used for status / restart restore). */
   @Nullable private JSONObject mLastPoint;
-  private long mLastPersistTs = 0;
   private File mLogFile;
   private boolean mPendingFix = false;
   private long mCurrentIntervalMs = 1000;
@@ -276,7 +261,6 @@ public class LocationTrackingService extends Service {
     } catch (Exception ignored) {
     }
 
-    mSameCount = 0;
     mCurrentIntervalMs = sConfig.intervalBaseMs;
     mHandler.removeCallbacks(mTick);
     mHandler.postDelayed(mTick, 0);
@@ -323,7 +307,7 @@ public class LocationTrackingService extends Service {
   private void onFixWatchdog() {
     if (mPendingFix) {
       mPendingFix = false;
-      scheduleNext(nextInterval());
+      scheduleNext(sConfig.intervalBaseMs);
     }
   }
 
@@ -355,13 +339,12 @@ public class LocationTrackingService extends Service {
       point.put("accuracy", accuracy);
     } catch (Exception e) {
       Log.e(LOGTAG, "point build failed", e);
-      scheduleNext(nextInterval());
+      scheduleNext(sConfig.intervalBaseMs);
       return;
     }
 
-    // 新点：同点连击归零；合并：n+1，下一次等待翻倍
-    boolean added = appendPoint(point);
-    mSameCount = added ? 0 : mSameCount + 1;
+    // 取到就记一条：不去重、不合并，判断全交给网页
+    addPoint(point);
 
     if (sListener != null) {
       try {
@@ -370,23 +353,7 @@ public class LocationTrackingService extends Service {
         Log.w(LOGTAG, "listener onPoint failed", e);
       }
     }
-    scheduleNext(nextInterval());
-  }
-
-  /**
-   * Next interval by the page's continuous-sampling strategy (locationAuto.ts
-   * nextSampleMs): fixed = base; backoff = base * 2^n capped at max.
-   */
-  private long nextInterval() {
-    if (LocationConfig.STRATEGY_FIXED.equals(sConfig.strategy)) {
-      return sConfig.intervalBaseMs;
-    }
-    int n = Math.min(Math.max(0, mSameCount), MAX_BACKOFF_N);
-    long ms = sConfig.intervalBaseMs;
-    for (int i = 0; i < n && ms < sConfig.intervalMaxMs; i++) {
-      ms *= 2;
-    }
-    return Math.min(ms, sConfig.intervalMaxMs);
+    scheduleNext(sConfig.intervalBaseMs);
   }
 
   private void scheduleNext(long intervalMs) {
@@ -407,45 +374,10 @@ public class LocationTrackingService extends Service {
   }
 
   // ---------------------------------------------------------------------------
-  // appendPoint() — native replica of the page's locationAuto.ts
+  // 记点：取到就存一条，不做任何判断
   // ---------------------------------------------------------------------------
 
-  /**
-   * Compare only with the last recorded point (haversine). Inside the threshold:
-   * merge (refresh ts + accuracy, keep coordinates/note), do not add, rev stays.
-   * Outside (or threshold 0): append a new point, rev++, persist immediately.
-   *
-   * @return true if a new point was appended, false if merged into the last one
-   */
-  private boolean appendPoint(JSONObject point) {
-    if (mLastPoint == null) {
-      addPoint(point);
-      return true;
-    }
-    try {
-      double distM =
-          haversineMeters(
-              mLastPoint.getDouble("lat"),
-              mLastPoint.getDouble("lng"),
-              point.getDouble("lat"),
-              point.getDouble("lng"));
-      double threshold = sConfig.thresholdM;
-      if (threshold > 0 && distM < threshold) {
-        // Merged: refresh ts + accuracy only; coordinates/note keep the first value.
-        mLastPoint.put("ts", point.getLong("ts"));
-        mLastPoint.put("accuracy", point.getDouble("accuracy"));
-        updateLastPointStatics(mLastPoint);
-        maybePersistTimeRefresh();
-        return false;
-      }
-      addPoint(point);
-      return true;
-    } catch (Exception e) {
-      Log.e(LOGTAG, "appendPoint failed", e);
-      return false;
-    }
-  }
-
+  /** 追加一条点：rev+1、立即落盘。去重 / 顶替归网页的 appendPoint()，壳不插手。 */
   private void addPoint(JSONObject point) {
     sRev++;
     try {
@@ -456,7 +388,7 @@ public class LocationTrackingService extends Service {
     mLastPoint = point;
     sPoints++;
     updateLastPointStatics(point);
-    persistLine(point, false);
+    persistLine(point);
   }
 
   private void updateLastPointStatics(JSONObject point) {
@@ -470,47 +402,13 @@ public class LocationTrackingService extends Service {
     }
   }
 
-  /** Time-only refreshes persist at most once every FLUSH_MS. */
-  private void maybePersistTimeRefresh() {
-    long now = System.currentTimeMillis();
-    if (now - mLastPersistTs >= FLUSH_MS) {
-      if (mLastPoint != null) {
-        persistLine(mLastPoint, true);
-      }
-      mLastPersistTs = now;
-    }
-  }
-
-  /**
-   * Append a new point line (fast path), or rewrite the last line for a merged
-   * (time-refresh) update so read-back semantics stay identical to the page's rows.
-   */
-  private synchronized void persistLine(JSONObject point, boolean replaceLast) {
-    try {
-      if (!replaceLast) {
-        try (FileOutputStream fos = new FileOutputStream(mLogFile, true);
-            OutputStreamWriter writer =
-                new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
-          writer.write(point.toString());
-          writer.write("\n");
-          writer.flush();
-        }
-        return;
-      }
-      List<String> lines = readLines();
-      if (!lines.isEmpty()) {
-        lines.remove(lines.size() - 1);
-      }
-      lines.add(point.toString());
-      try (FileOutputStream fos = new FileOutputStream(mLogFile, false);
-          OutputStreamWriter writer =
-              new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
-        for (String line : lines) {
-          writer.write(line);
-          writer.write("\n");
-        }
-        writer.flush();
-      }
+  /** Append one point line to the JSONL log. */
+  private synchronized void persistLine(JSONObject point) {
+    try (FileOutputStream fos = new FileOutputStream(mLogFile, true);
+        OutputStreamWriter writer = new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
+      writer.write(point.toString());
+      writer.write("\n");
+      writer.flush();
     } catch (Exception e) {
       Log.e(LOGTAG, "persistLine failed", e);
     }
@@ -540,13 +438,27 @@ public class LocationTrackingService extends Service {
     return lines;
   }
 
-  private JSONArray readAllPoints() {
-    JSONArray arr = new JSONArray();
-    for (String line : readLines()) {
+  /**
+   * sinceMs > 0：只回 ts 比它新的点。文件按时间正序，所以从尾部往前扫，
+   * 扫到不比 since 新的那一行就停——跑久了也不会每次解析全量。
+   * 返回仍按时间正序（网页 appendPoint 依赖顺序）。
+   */
+  private JSONArray readAllPoints(long sinceMs) {
+    List<String> lines = readLines();
+    ArrayList<JSONObject> picked = new ArrayList<>();
+    for (int i = lines.size() - 1; i >= 0; i--) {
       try {
-        arr.put(new JSONObject(line));
+        JSONObject p = new JSONObject(lines.get(i));
+        if (sinceMs > 0 && p.optLong("ts", 0) <= sinceMs) {
+          break;
+        }
+        picked.add(p);
       } catch (Exception ignored) {
       }
+    }
+    JSONArray arr = new JSONArray();
+    for (int i = picked.size() - 1; i >= 0; i--) {
+      arr.put(picked.get(i));
     }
     return arr;
   }
@@ -607,20 +519,6 @@ public class LocationTrackingService extends Service {
     } catch (Exception ignored) {
     }
     return LocationManager.GPS_PROVIDER;
-  }
-
-  /** Standard haversine great-circle distance in meters. */
-  public static double haversineMeters(double lat1, double lng1, double lat2, double lng2) {
-    double R = 6371000.0;
-    double dLat = Math.toRadians(lat2 - lat1);
-    double dLng = Math.toRadians(lng2 - lng1);
-    double a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2)
-            + Math.cos(Math.toRadians(lat1))
-                * Math.cos(Math.toRadians(lat2))
-                * Math.sin(dLng / 2)
-                * Math.sin(dLng / 2);
-    return 2 * R * Math.asin(Math.min(1.0, Math.sqrt(a)));
   }
 
   @Override

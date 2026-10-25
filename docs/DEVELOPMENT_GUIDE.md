@@ -1,8 +1,9 @@
 # 长期定位记录 · 原生兜底服务开发文档
 
 > 对应版本：v1.1.1+（WebView 壳）
-> 功能：网页后台/锁屏期间由原生前台服务持续记录定位，与网页自身 `locationAuto.ts`
-> 的算法语义严格对齐（连续打点策略 + appendPoint 去重）。
+> 功能：网页后台/锁屏期间由原生前台服务持续记录定位。
+> **壳不做任何定位策略**：按 `intervalBaseMs` 固定间隔取一次定位，取到就存一条、
+> 推一条事件；去重 / 顶替 / 退避全部归网页 `locationAuto.ts`。
 
 ---
 
@@ -23,7 +24,8 @@
                                                        ▼
                                               LocationTrackingService（前台服务）
                                                │ LocationManager（定位）
-                                               │ 连续打点策略（定时 / 同点 2^n 退避）+ appendPoint
+                                               │ 固定间隔 intervalBaseMs 取一次，取到就存/推
+                                               │（不去重、不退避，策略全在网页）
                                                ▼
                                         filesDir/location_log.jsonl
 ```
@@ -36,10 +38,13 @@
 | `location.start` | 页面→原生 | 申请定位权限（缺省时）→ 启动服务；返回 status + `alreadyRunning` |
 | `location.stop` | 页面→原生 | 停止服务 |
 | `location.status` | 页面→原生 | `{tracking, enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs, startedAt, points, rev, lastPoint{ts,lat,lng,accuracy,note}}` |
-| `location.getHistory` | 页面→原生 | `{points:[{ts,lat,lng,accuracy,rev,...}], rev}` |
+| `location.getHistory` | 页面→原生 | `{since?: number}` → `{points:[{ts,lat,lng,accuracy,rev,...}], rev}`；传 `since` 只回 `ts > since` 的点（网页传已合并到的游标，跑久了也不用回传全量） |
 | `location.clearHistory` | 页面→原生 | 清空记录 |
-| `location.getFix` | 页面→原生 | 一次性定位（手动「我的位置 / 打点」用）：与连续打点同一个原生 GPS 源，绕开 WebView 拦截的 `navigator.geolocation`（那条在壳里常『申请了定位却回不来坐标』）；成功回 `{lat, lng, accuracy}`（WGS-84，米，页面换算 GCJ-02），失败回 `ok:false`（如定位权限被拒、信号不可用）；缺定位权限时先弹系统权限申请，拒绝回 `ok:false`；不要静默不回，否则页面卡到超时 |
-| `location.point` | 原生→页面(事件) | 每记录一点实时推送 `{ts,lat,lng,accuracy,rev}` |
+| `location.point` | 原生→页面(事件) | 每取到一个点实时推送 `{ts,lat,lng,accuracy,rev}` |
+
+> `location.getFix`（一次性定位）已在 v1.1.2 移除：手动「我的位置 / 打点」现在直接走
+> WebView 的 `navigator.geolocation`（`WebSettings.setGeolocationEnabled(true)` 已开），
+> 不再需要壳转发。它当年带的 8s 超时正是「刷新后打点要等 8 秒」的来源之一。
 
 页面端用法：
 
@@ -47,21 +52,17 @@
 // 推送配置（页面 localStorage 变更时也调用，保证热同步）
 await bridge('location.setConfig', {
   enabled: true,
-  thresholdM: 5,
-  strategy: 'backoff', // 'fixed' = 定时；'backoff' = 同点 2^n 退避
-  intervalBaseMs: 1000,
-  intervalMaxMs: 64000,
+  thresholdM: 5,      // 壳照收但不用：去重归网页
+  strategy: 'backoff',// 壳照收但不用：退避归网页
+  intervalBaseMs: 1000, // ← 壳只看这一个：固定采样间隔
+  intervalMaxMs: 64000, // 壳照收但不用
 });
 
 // 开启 / 状态 / 历史
 await bridge('location.start');
 const st = await bridge('location.status');
-const hist = await bridge('location.getHistory');
-hist.points.forEach(p => appendPoint(p)); // 复用网页去重逻辑合并
-
-// 手动一次性定位（「我的位置 / 打点」优先走这条，与连续打点同 GPS 源）
-const fix = await bridge('location.getFix');
-// fix = { lat, lng, accuracy } —— WGS-84，页面换算成 GCJ-02
+const hist = await bridge('location.getHistory', { since: lastMergedTs });
+hist.points.forEach(p => appendPoint(p)); // 去重 / 顶替都在网页这一层
 ```
 
 ## 3. 配置（dr.autoLocation）
@@ -79,45 +80,37 @@ localStorage，因此有两路同步：
 | 字段 | 默认 | 语义 |
 |---|---|---|
 | `enabled` | false | 是否开启长期记录；true 且有定位权限时自动启动服务；true 但缺权限时弹系统权限申请，用户拒绝则 `ok:false` 由网页降级 |
-| `thresholdM` | 5 | 去重阈值（米）；非数字/负数按 0（不去重，每次取点都落点） |
-| `strategy` | `backoff` | 连续打点策略：`fixed` 定时；`backoff` 同点 2^n 退避 |
-| `intervalBaseMs` | 1000 | 基准间隔：fixed 的固定周期 / backoff 的 2^0 档 |
-| `intervalMaxMs` | 64000 | backoff 封顶；默认 64s（n=6 起不再翻倍） |
-| `moveThresholdM` | 10 | **旧字段（壳 ≤1.0.1）**：驱动 1s/30s/60s 三档；新壳只解析不再使用 |
+| `intervalBaseMs` | 1000 | **壳唯一使用的字段**：固定采样间隔，每这么久取一次定位 |
+| `thresholdM` | 5 | 旧字段：去重阈值；**壳照收但不使用**（去重归网页） |
+| `strategy` | `backoff` | 旧字段：连续打点策略；**壳照收但不使用**（退避归网页） |
+| `intervalMaxMs` | 64000 | 旧字段：backoff 封顶；**壳照收但不使用** |
+| `moveThresholdM` | 10 | 旧字段（壳 ≤1.0.1）驱动 1s/30s/60s 三档；只解析不使用 |
 
-> 旧字段保留解析，是为了「新页面 + 旧壳」和「旧页面 + 新壳」两种组合都不报错；
-> 新壳的调度完全由 `strategy` / `intervalBaseMs` / `intervalMaxMs` 决定。
+> 旧字段保留解析，是为了「新页面 + 旧壳」「旧页面 + 新壳」两种组合都不报错。
+> v1.1.2 起壳的调度只由 `intervalBaseMs` 决定。
 
-## 4. 连续打点策略（原生实现）
+## 4. 采样：固定间隔，不含策略
 
-页面与壳共用同一份规则（网页 `locationAuto.ts` 的 `nextSampleMs()`）：
+`Handler` 定时器每 `intervalBaseMs` 触发一次 tick，`requestSingleUpdate` 取一次定位，
+**取到就存一条 JSONL、就推一条 `location.point` 事件**，然后排下一次。不去重、不退避、
+不看位移、不看传感器。定位请求带看门狗（interval + 800ms 无回调则跳过），
+GPS 信号差不会卡死循环。
 
-- **fixed**：每次等 `intervalBaseMs`（默认 1s）。
-- **backoff**：设 `n` = 「连续落在同一个点的次数」（去重命中即 +1，新增点归零），
-  下一次等待 `min(intervalBaseMs × 2^n, intervalMaxMs)`。
-  默认参数下序列是 1, 1, 1, 2, 4, 8, 16, 32, 64, 64, 64… 秒。
-  一旦位移超过 `thresholdM` 产生新点，`n` 立刻归零，回到 1s —— 走动时轨迹是密的，
-  只有真的不动才逐步放慢。
+> 曾经壳里复刻了网页的「同点 2^n 退避 + 阈值去重」，已删除。两份实现状态必然不同步：
+> 页面刷新会把自己退避计数清零，而壳的服务跨刷新活着、计数不清零——表现就是
+> 「刷新前 1s 一个点，刷新后变成 8s 一个点」。策略只留一份，放在网页。
 
-实现：`Handler` 定时器按 `nextInterval()` 调度；每次 tick `requestSingleUpdate` 取一次
-定位；收到 fix 后 `appendPoint()` 返回是否新增 → 更新 `mSameCount` → 排下一次。定位请求
-带看门狗（interval + 800ms 无回调则跳过），GPS 信号差不会卡死循环。
+## 5. 去重归网页，壳不复刻
 
-> v1.1.0 起移除了加速度计与 1s/30s/60s 三档：频率只由「是否还在同一个点」决定，
-> 网页/壳看到的行为完全一致。
-
-## 5. appendPoint 原生复刻（与网页语义一一对应）
-
-| 网页规则 | 原生实现（LocationTrackingService.appendPoint） |
+| 网页（`locationAuto.ts`） | 壳 |
 |---|---|
-| 只与 rows 最后一条比 | 只与内存 `mLastPoint`（含启动时从文件尾恢复）比 |
-| haversine 球面距离 | `haversineMeters()`，同公式 |
-| 阈值内：更新 ts + accuracy，保留坐标/note，不新增，rev 不变 | 命中 → 改写 `mLastPoint` 的 ts/accuracy，不写新行 |
-| 阈值外：新增点，rev+1，立即写盘 | 未命中 → `addPoint`：rev+1、追加 JSONL 一行 |
-| 仅时间刷新：最多 15s 落一次盘（FLUSH_MS=15000） | `maybePersistTimeRefresh()`：距上次落盘 ≥15s 才重写末行 |
-| 手动打点每次都 persist | （网页手动打点发生在页面可见时，由网页自己处理） |
-| 阈值 0 = 不去重 | `thresholdM<=0` 直接走新增分支 |
-| 比较原始坐标，offset 只影响显示 | 原生只存原始坐标 |
+| `appendPoint()`：跟倒数第二个点比距离，近了就顶掉末点 | 不做判断，取到就 `addPoint()` |
+| `nextSampleMs()`：fixed / 同点退避 | 不用，恒定 `intervalBaseMs` |
+| 写入节流：原地顶替最多 15s 落一次盘 | 每条立即追加一行 |
+| 比较 / 存原始坐标，offset 只影响显示 | 同：只存原始坐标（WGS-84） |
+
+壳的历史因此可能比网页的行数多（原地点也会记），这是预期的：
+网页合并时逐点走 `appendPoint`，多出来的点会被顶替掉，行数不会涨。
 
 ## 6. 落盘格式
 
@@ -128,9 +121,8 @@ localStorage，因此有两路同步：
 ```
 
 - `ts`：毫秒时间戳（location.getTime()）。
-- 新增点：文件追加一行。
-- 时间刷新命中：删除末行后重写（文件小，开销可接受），保证读回语义与网页 rows 一致。
-- 网页合并时逐点 `appendPoint` 会再次去重，两边语义幂等。
+- 每取到一个点就追加一行，不改写旧行（壳不去重，也就没有「刷新末行」这回事）。
+- 网页合并时逐点走 `appendPoint`，多出来的原地点会被顶替掉，行数不会涨。
 
 ## 7. 权限与生命周期
 
