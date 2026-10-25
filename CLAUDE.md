@@ -94,6 +94,15 @@
 - `applicationId` **发布后不可改**，改它等于换一个 App（用户数据、签名全作废），
   必须用户明确确认才动。
 
+## 铁律九：网页的 `/releases/*/` 是定稿，壳这边也不许碰
+
+用户 2026-10-25 立规：**不要动 `/releases/*/` 里的东西，`/releases/*/` 已经是定稿了。**
+
+- 壳只读它们：`DEFAULT_URL` 目前指向站点根路径；就算哪天切回快照，也只是读，
+  **不重写、不删除、不"更新一版"**。
+- 壳发版不许要求网页侧重写快照来配合；网页回滚走 `main` 的 revert + 重新部署。
+- 网页仓库 `CLAUDE.md` 铁律七是同一件事的正本，冲突时以那份为准。
+
 ## 目录结构
 
 ```
@@ -109,7 +118,7 @@ geckoview_example/
 │       ├── JsBridge.java        桥入口：invoke/action 路由 + respond/emit + getEnv()
 │       ├── LocationBridge.java  location.* 路由 + 权限申请 + 后台权限引导
 │       ├── LocationConfig.java  配置模型 + SharedPreferences 镜像（dr.autoLocation）
-│       ├── LocationTrackingService.java  前台服务：状态机、appendPoint、JSONL 落盘
+│       ├── LocationTrackingService.java  前台服务：连续打点、appendPoint、JSONL 落盘
 │       ├── BleManager.java      蓝牙 Central/Peripheral
 │       ├── FileBridge.java      文件读写
 │       ├── ScreenCaptureManager.java + ScreenCaptureService.java  录屏
