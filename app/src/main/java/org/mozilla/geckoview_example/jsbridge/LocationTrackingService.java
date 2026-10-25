@@ -19,6 +19,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
+import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 
@@ -71,6 +72,13 @@ public class LocationTrackingService extends Service {
   /** Persist throttle for time-only refreshes (page FLUSH_MS = 15000). */
   private static final long FLUSH_MS = 15000;
 
+  /** 定位采集 Toast 节流时间戳（测试内容）。 */
+  private static volatile long sLastFixToastAt = 0;
+
+  /** Accelerometer magnitude-change threshold to treat the phone as "moving". */
+  private static final double SENSOR_MOVE_THRESHOLD = 0.4; // m/s^2 change
+  /** How long a detected movement keeps the "moving" flag alive. */
+  private static final long SENSOR_MOVE_WINDOW_MS = 1500;
   /** Location fix watchdog: if no fix arrives within interval+slack, retry. */
   private static final long FIX_WATCHDOG_SLACK_MS = 800;
 
@@ -262,6 +270,11 @@ public class LocationTrackingService extends Service {
     sConfig = LocationConfig.load(this);
     sRunning = true;
     sStartedAt = System.currentTimeMillis();
+    // 测试内容：原生定位服务启动时 Toast 提示。
+    try {
+      Toast.makeText(this, "原生定位服务正在记录位置", Toast.LENGTH_SHORT).show();
+    } catch (Exception ignored) {
+    }
 
     mSameCount = 0;
     mCurrentIntervalMs = sConfig.intervalBaseMs;
@@ -319,6 +332,15 @@ public class LocationTrackingService extends Service {
     mHandler.removeCallbacks(mFixWatchdog);
     if (!sRunning || mStopping) {
       return;
+    }
+    // 测试内容：每次取到定位时 Toast 提示（30s 节流，避免高频 1s 档刷屏）。
+    long now = System.currentTimeMillis();
+    if (now - sLastFixToastAt > 30000) {
+      sLastFixToastAt = now;
+      try {
+        Toast.makeText(this, "原生定位服务取到定位点", Toast.LENGTH_SHORT).show();
+      } catch (Exception ignored) {
+      }
     }
     double lat = location.getLatitude();
     double lng = location.getLongitude();
