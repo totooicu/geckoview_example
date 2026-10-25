@@ -115,6 +115,13 @@ public class JsBridge {
       JSONObject o = new JSONObject();
       o.put("app", "朝汇夕思");
       o.put("version", org.mozilla.geckoview_example.BuildConfig.VERSION_NAME);
+      // 构建时间（Asia/Shanghai，gradle 打包时刻注入 BuildConfig.BUILD_TIME）：
+      // 壳发出去就收不回来，光看 versionName 分不出同号的两次构建，
+      // 网页的版本条靠它区分「跑的是哪份代码」。
+      o.put("builtAt", org.mozilla.geckoview_example.BuildConfig.BUILD_TIME);
+      // 打包时的最后一次 git 提交（短哈希，注入 BuildConfig.GIT_COMMIT）：
+      // 版本条要能说出「壳 x.y.z（MM-dd HH:mm @ 短哈希）」。
+      o.put("commit", org.mozilla.geckoview_example.BuildConfig.GIT_COMMIT);
       o.put("platform", "android");
       o.put("isApp", true);
       o.put("bridge", "jsi-v1");

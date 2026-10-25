@@ -2,6 +2,22 @@ plugins {
     id 'com.android.application'
 }
 
+/** 打包时的最后一次 git 提交（短哈希）：注入 BuildConfig.GIT_COMMIT，
+ *  getEnv() 报给网页——壳发出去就收不回来，版本条要能说出「跑的是哪份代码」。
+ *  Gradle 9 移除了 Project.exec()，用纯 Java 的 ProcessBuilder。 */
+def gitCommitShort() {
+    try {
+        def p = new ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+        p.redirectErrorStream(true)
+        def proc = p.start()
+        def s = proc.inputStream.text.trim()
+        proc.waitFor()
+        return s ?: "unknown"
+    } catch (Exception ignored) {
+        return "unknown"
+    }
+}
+
 android {
     namespace = 'org.mozilla.geckoview_example'
     compileSdk {
@@ -14,6 +30,14 @@ android {
         targetSdk 36
         versionCode 2
         versionName "0.2.1"
+        // 版本时间：写死为「提交 GitHub 的时间」（Asia/Shanghai），发版流程见
+        // CLAUDE.md「版本对齐」：push 到 GitHub 后，把该提交时间更新到这里，
+        // 网页经 getEnv().builtAt 查询，版本条显示「壳 x.y.z（MM-dd HH:mm @ …）」。
+        // 当前值对应本版本暴露提交（2026-10-26 03:28 +08:00）。
+        buildConfigField "String", "BUILD_TIME", "\"2026-10-26 03:28\""
+        // git 短哈希：构建时动态取当前 HEAD（Gradle 9 移除 Project.exec，
+        // 用 ProcessBuilder；无 git 环境的机器会得到 "unknown"，需在发版机构建）。
+        buildConfigField "String", "GIT_COMMIT", "\"${gitCommitShort()}\""
     }
 
     buildTypes {
