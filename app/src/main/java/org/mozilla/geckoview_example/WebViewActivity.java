@@ -125,6 +125,7 @@ public class WebViewActivity extends AppCompatActivity {
           public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
             injectAdapter(view);
+            pullLocationConfig(view);
           }
 
           @Override
@@ -243,6 +244,56 @@ public class WebViewActivity extends AppCompatActivity {
   /** Inject the adapter script; safe to call repeatedly. */
   private void injectAdapter(WebView view) {
     view.evaluateJavascript(ADAPTER_JS, null);
+  }
+
+  /**
+   * Pull the page's dr.autoLocation config out of browser storage once the page
+   * has loaded, so native has the latest copy even if the page never calls
+   * location.setConfig. The JS returns a wrapper object to avoid string-escaping
+   * surprises from evaluateJavascript.
+   */
+  private void pullLocationConfig(WebView view) {
+    view.evaluateJavascript(
+        "(function(){try{var v=localStorage.getItem('dr.autoLocation');"
+            + "return JSON.stringify({ok:true,v:v});}"
+            + "catch(e){return JSON.stringify({ok:false});}})()",
+        value -> {
+          if (value == null || value.isEmpty() || "null".equals(value)) {
+            return;
+          }
+          try {
+            org.json.JSONObject wrapper = new org.json.JSONObject(value);
+            if (!wrapper.optBoolean("ok", false)) {
+              return;
+            }
+            String v = wrapper.optString("v", "");
+            if (v.isEmpty()) {
+              return;
+            }
+            org.mozilla.geckoview_example.jsbridge.LocationConfig cfg =
+                org.mozilla.geckoview_example.jsbridge.LocationConfig.fromJson(v);
+            mJsBridge.location().handle(
+                "config-pull", "location.setConfig", new org.json.JSONObject(cfgToJson(cfg)), mJsBridge);
+          } catch (Exception e) {
+            Log.w(LOGTAG, "pullLocationConfig failed: " + e.getMessage());
+          }
+        });
+  }
+
+  /** Serialize a config back to JSON params for the bridge handler. */
+  private String cfgToJson(org.mozilla.geckoview_example.jsbridge.LocationConfig cfg) {
+    try {
+      org.json.JSONObject o = new org.json.JSONObject();
+      o.put("enabled", cfg.enabled);
+      o.put("thresholdM", cfg.thresholdM);
+      o.put("moveThresholdM", cfg.moveThresholdM);
+      o.put("intervalFastMs", cfg.intervalFastMs);
+      o.put("intervalMidMs", cfg.intervalMidMs);
+      o.put("intervalSlowMs", cfg.intervalSlowMs);
+      return o.toString();
+    } catch (Exception e) {
+      return "{}";
+    }
   }
 
   /* ----------------------------------------------------------------------------
