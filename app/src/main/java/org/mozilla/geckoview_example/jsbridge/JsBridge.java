@@ -116,7 +116,7 @@ public class JsBridge {
   public String getEnv() {
     try {
       JSONObject o = new JSONObject();
-      o.put("app", "DatingRecord");
+      o.put("app", "朝汇夕思");
       o.put("version", org.mozilla.geckoview_example.BuildConfig.VERSION_NAME);
       o.put("platform", "android");
       o.put("isApp", true);
