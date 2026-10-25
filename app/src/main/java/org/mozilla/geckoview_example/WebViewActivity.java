@@ -33,6 +33,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -76,6 +77,21 @@ public class WebViewActivity extends AppCompatActivity {
   private JsBridge mJsBridge;
   /** Pending file-chooser callback from <input type="file">. */
   @Nullable private ValueCallback<Uri[]> mFilePathCallback;
+
+  /** True once the current page finished loading (bridge handoff is safe). */
+  private boolean mPageReady = false;
+  /** True while waiting for the page to answer a forwarded back press. */
+  private boolean mBackWaitActive = false;
+  /** How long the page may answer a forwarded back press before the shell falls back. */
+  private static final long BACK_TIMEOUT_MS = 3000;
+  private final Handler mMainHandler = new Handler(Looper.getMainLooper());
+  private final Runnable mBackTimeout =
+      () -> {
+        if (mBackWaitActive) {
+          mBackWaitActive = false;
+          performDefaultBack();
+        }
+      };
 
   /**
    * Adapter script: registers the page-facing callback and forwards the page's
@@ -130,6 +146,7 @@ public class WebViewActivity extends AppCompatActivity {
           @Override
           public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
             super.onPageStarted(view, url, favicon);
+            mPageReady = false;
             injectAdapter(view);
           }
 
@@ -137,6 +154,7 @@ public class WebViewActivity extends AppCompatActivity {
           public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
             injectAdapter(view);
+            mPageReady = true;
           }
 
           @Override
@@ -210,6 +228,25 @@ public class WebViewActivity extends AppCompatActivity {
 
     mWebView.addJavascriptInterface(mJsBridge, "AndroidBridge");
     mJsBridge.attach(mWebView);
+
+    // Forward the system back press to the page (ui.backPressed event) and let
+    // the page decide (ui.finish / ui.goBack); fall back after a timeout so the
+    // back button never becomes dead. Uses OnBackPressedCallback (API 33+ uses
+    // the back dispatcher; the deprecated onBackPressed() is not called).
+    mJsBridge.setUiActionHandled(
+        () -> {
+          mMainHandler.removeCallbacks(mBackTimeout);
+          mBackWaitActive = false;
+        });
+    getOnBackPressedDispatcher()
+        .addCallback(
+            this,
+            new OnBackPressedCallback(true) {
+              @Override
+              public void handleOnBackPressed() {
+                onBackKey();
+              }
+            });
 
     loadUrl(DEFAULT_URL);
   }
@@ -519,6 +556,21 @@ public class WebViewActivity extends AppCompatActivity {
 
   @Override
   public void onDestroy() {
+    mMainHandler.removeCallbacks(mBackTimeout);
+    // The screen-capture service depends on this activity's MediaProjection token;
+    // stop it when the shell is torn down. Location tracking keeps running by
+    // design (it is the background fallback of the long-running record feature).
+    if (org.mozilla.geckoview_example.jsbridge.ScreenCaptureService.isRunning()) {
+      try {
+        Intent stop =
+            new Intent(this, org.mozilla.geckoview_example.jsbridge.ScreenCaptureService.class)
+                .setAction(
+                    org.mozilla.geckoview_example.jsbridge.ScreenCaptureService.ACTION_STOP);
+        startService(stop);
+      } catch (Exception e) {
+        Log.w(LOGTAG, "stop screen capture failed", e);
+      }
+    }
     mJsBridge.onDestroy();
     if (mWebView != null) {
       mWebView.destroy();
@@ -527,13 +579,49 @@ public class WebViewActivity extends AppCompatActivity {
     super.onDestroy();
   }
 
-  @Override
-  public void onBackPressed() {
+  /**
+   * System back key handling: forward to the page instead of navigating directly.
+   *
+   * <ul>
+   *   <li>Page not ready (loading, no bridge): behave like a normal browser.</li>
+   *   <li>First press while ready: emit ui.backPressed and wait BACK_TIMEOUT_MS.</li>
+   *   <li>Second press while waiting, or timeout: default behavior
+   *       (goBack if possible, otherwise finish).</li>
+   * </ul>
+   */
+  private void onBackKey() {
+    if (!mPageReady || mJsBridge == null || mWebView == null) {
+      performDefaultBack();
+      return;
+    }
+    if (mBackWaitActive) {
+      // User pressed again before the page answered: stop waiting, act now.
+      mMainHandler.removeCallbacks(mBackTimeout);
+      mBackWaitActive = false;
+      performDefaultBack();
+      return;
+    }
+    mBackWaitActive = true;
+    try {
+      org.json.JSONObject data = new org.json.JSONObject();
+      data.put("atRoot", !mWebView.canGoBack());
+      mJsBridge.emit("ui.backPressed", data);
+    } catch (Exception e) {
+      Log.w(LOGTAG, "emit ui.backPressed failed", e);
+      mBackWaitActive = false;
+      performDefaultBack();
+      return;
+    }
+    mMainHandler.removeCallbacks(mBackTimeout);
+    mMainHandler.postDelayed(mBackTimeout, BACK_TIMEOUT_MS);
+  }
+
+  private void performDefaultBack() {
     if (mWebView != null && mWebView.canGoBack()) {
       mWebView.goBack();
       return;
     }
-    super.onBackPressed();
+    finish();
   }
 
   private int dp(int v) {
