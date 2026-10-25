@@ -1,6 +1,6 @@
 # 壳发布手册（APK）
 
-> 对应版本：v1.0.1+（WebView 壳）
+> 对应版本：v1.1.0+（WebView 壳）
 > 配套手册：网页仓库 `DatingRecord/RELEASE.md`（**版本配对的唯一真相源**）
 
 壳发版的难点不在构建，在**不可逆**：APK 装到手机上就收不回来，签名钥匙换一次等于换一个 App，
@@ -21,16 +21,17 @@
 
 ---
 
-## 二、加载地址：只许指向快照
+## 二、加载地址：站点根路径（跟随网页最新）
 
 ```java
-DEFAULT_URL = "https://totooicu.github.io/DatingRecord/releases/v1/";
+DEFAULT_URL = "https://totooicu.github.io/DatingRecord/";
 ALLOWED_HOST = "totooicu.github.io";
 ```
 
-- **必须指向 `releases/v<大版本>/`，不许指向站点根路径**。根路径跟着网页 `main` 走，
-  一次部署就变；壳指向它等于没锁版本，出了问题无法复现。
-- 快照由网页仓库的 `release-v1-pages.yml` 在打 `v1.x` tag 时写入，日常部署会保留它。
+- **v1.1.0 起指向站点根路径**：壳打开的就是网页 `main` 的最新部署，网页修 bug 不必再发壳；
+  代价是壳里的页面会随网页发版变化，排查问题时先看「版本配对」卡里的网页版本。
+- 冻结快照 `releases/v1/` 仍由网页仓库的 `release-v1-pages.yml` 在打 `v1.x` tag 时生成、
+  日常部署会保留它；它现在用于回滚和对照，壳不再指向它。
 - `ALLOWED_HOST` 是域名锁，指到子路径不影响；站外链接仍被拦掉。
 
 ---
@@ -50,10 +51,10 @@ ALLOWED_HOST = "totooicu.github.io";
 ## 四、发布前检查
 
 1. **版本号**：`versionName` 与网页同号；`versionCode` 比上一版大。
-2. **加载地址**：`DEFAULT_URL` 指向对应的 `releases/v<大版本>/`。
+2. **加载地址**：`DEFAULT_URL` 是站点根路径（v1.1.0 起的策略）；临时切回快照时，必须与网页版本同号。
 3. **桥的改动**：新增 action 可以照常发；删/改语义必须与网页同版本，并升 `proto`。
-4. **网页已就绪**：网页侧同版本的快照已经上线（`.../releases/v1/version.json` 的 `release` 对得上）。
-   顺序上**先发网页快照，再发壳**——反了的话，新壳第一次打开会是旧页面。
+4. **网页已就绪**：根路径加载的是网页 `main` 的部署，确认 `.../DatingRecord/version.json`
+   已经是最新一次部署。
 5. **文档同步**：涉及桥的改动先改 `docs/`，再改 Java（铁律三）；版本推进时更新两份 guide 的
    头部版本号（铁律七）。
 
@@ -87,8 +88,10 @@ git branch -d feat/release-<版本> && git push origin --delete feat/release-<�
 .../apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk | grep SHA-256
 #   → 与上一版同一个指纹（换钥匙就露馅了）
 
+unzip -p app/build/outputs/apk/release/app-release.apk classes*.dex | strings | grep -c "totooicu.github.io/DatingRecord/"
+#   → >0：加载地址在包里（根路径）
 unzip -p app/build/outputs/apk/release/app-release.apk classes*.dex | strings | grep -c "releases/v1"
-#   → >0 说明加载地址确实是快照，不是根路径
+#   → 0：没有误指回冻结快照
 ```
 
 **分发**
@@ -105,9 +108,9 @@ unzip -p app/build/outputs/apk/release/app-release.apk classes*.dex | strings | 
 | 场景 | 做法 |
 |---|---|
 | 壳有严重 bug | 重新分发上一版 APK（同签名可直接覆盖安装，本地数据不丢） |
-| 壳加载的页面出问题 | 不用动壳：网页侧把快照 tag 重打到可用提交，壳下次打开就换回来了 |
+| 壳加载的页面出问题 | 不用动壳：网页侧修完推 `main`（或 revert 有问题的提交）即可，壳下次打开就换回来 |
 | 已推的 tag 指向错提交 | `git tag -f v<版本> <正确提交> && git push -f origin v<版本>`，并在提交信息里写明原因 |
-| 想彻底停掉某版本 | 不改已发 APK；用网页快照回滚让它「变好」，而不是指望用户卸载 |
+| 想彻底停掉某版本 | 不改已发 APK；网页侧回滚 `main` 让页面「变好」，而不是指望用户卸载 |
 
 **永远不要**为了回滚去改 `applicationId` 或换签名——那等于让所有已装用户变成重装。
 
@@ -119,9 +122,10 @@ unzip -p app/build/outputs/apk/release/app-release.apk classes*.dex | strings | 
 |---|---|---|
 | 安装报「应用未安装 / 签名不一致」 | 构建机换了，钥匙不是同一把 | 找回原 `debug.keystore`；找不回就只能卸载重装（数据会丢，先让用户导出） |
 | 安装被拒但签名对 | `versionCode` 没加 | 加 1 重新出包 |
-| 启动白屏 | `DEFAULT_URL` 不可达 / 快照目录不存在 | 浏览器先打开同一 URL；确认快照已发布 |
+| 启动白屏 | `DEFAULT_URL` 不可达 / 网页部署失败 | 浏览器先打开同一 URL；确认网页 `deploy-pages` 最近一次成功 |
 | 页面能开但原生全失效 | 桥没注入 | 看 Logcat `WebViewActivity`；确认 `data-gv-bridge-injected` |
-| 页面停在旧版 | 壳指了根路径 | 改回 `releases/v<大版本>/` |
+| 页面停在旧版 | 网页根路径部署没成功 / 缓存 | 查网页 `version.json` 的时间戳；必要时清站点数据 |
+| 页面版本和壳不配套 | 壳跟根路径走，网页可能已更新 | 看「版本配对」卡；不在支持范围就发同版本壳 |
 | 适配测试显示「壳太旧」 | 网页 `SHELL_MIN` 高于壳版本 | 出同版本壳，或用配套旧网页 |
 | 录音报 `NotReadableError` | 机型侧给静音数据（原生也录不到） | 自检报告会指出；按 `docs/ADAPTATION_GUIDE.md` FAQ 排查，不是壳的权限问题 |
 
@@ -131,6 +135,7 @@ unzip -p app/build/outputs/apk/release/app-release.apk classes*.dex | strings | 
 
 | 日期 | 壳 | 网页 | proto | versionCode | 说明 |
 |---|---|---|---|---|---|
+| 2026-10-25 | v1.1.0 | v1.1.0 | 1 | 5 | 连续打点策略（同点 2^n 退避，1→64s）；加载地址改回站点根路径 |
 | 2026-10-25 | v1.0.1 | v1.0.1 | 1 | 4 | 加载冻结快照 `releases/v1/` |
 | 2026-10-25 | v1.0.0 | v1.0.0 | 1 | 3 | 第一个正式版（指向根路径，已被取代） |
 | 2026-10-25 | v0.2.1 | — | — | 2 | 麦克风自检诊断版（仅测试） |

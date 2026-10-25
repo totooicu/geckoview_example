@@ -20,9 +20,9 @@ import org.json.JSONObject;
  *
  * <p>Actions (via JsBridge):</p>
  * <ul>
- *   <li>location.setConfig {enabled, thresholdM, moveThresholdM, ...} — page pushes
- *       its dr.autoLocation config; native saves it and auto-starts/stops the
- *       service when enabled toggles (needs fine-location permission).</li>
+ *   <li>location.setConfig {enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs}
+ *       — page pushes its dr.autoLocation config; native saves it and auto-starts/stops
+ *       the service when enabled toggles (needs fine-location permission).</li>
  *   <li>location.start — request permissions and start the foreground service.</li>
  *   <li>location.stop — stop the service.</li>
  *   <li>location.status — {tracking, startedAt, points, rev, lastPoint}.</li>
@@ -91,6 +91,9 @@ public class LocationBridge {
       r.put("enabled", cfg.enabled);
       r.put("thresholdM", cfg.thresholdM);
       r.put("moveThresholdM", cfg.moveThresholdM);
+      r.put("strategy", cfg.strategy);
+      r.put("intervalBaseMs", cfg.intervalBaseMs);
+      r.put("intervalMaxMs", cfg.intervalMaxMs);
       r.put("tracking", LocationTrackingService.isRunning());
       bridge.respond(id, true, r, null);
     } catch (Exception e) {
@@ -165,6 +168,9 @@ public class LocationBridge {
       o.put("enabled", cfg.enabled);
       o.put("thresholdM", cfg.thresholdM);
       o.put("moveThresholdM", cfg.moveThresholdM);
+      o.put("strategy", cfg.strategy);
+      o.put("intervalBaseMs", cfg.intervalBaseMs);
+      o.put("intervalMaxMs", cfg.intervalMaxMs);
     } catch (Exception ignored) {
     }
     return o;

@@ -1,8 +1,8 @@
 # 长期定位记录 · 原生兜底服务开发文档
 
-> 对应版本：v1.0.1+（WebView 壳）
+> 对应版本：v1.1.0+（WebView 壳）
 > 功能：网页后台/锁屏期间由原生前台服务持续记录定位，与网页自身 `locationAuto.ts`
-> 的算法语义严格对齐（频率状态机 + appendPoint 去重）。
+> 的算法语义严格对齐（连续打点策略 + appendPoint 去重）。
 
 ---
 
@@ -22,9 +22,8 @@
                                                        │ 权限申请 / 配置同步
                                                        ▼
                                               LocationTrackingService（前台服务）
-                                               │ SensorManager（手机动检测）
                                                │ LocationManager（定位）
-                                               │ 频率状态机 + appendPoint
+                                               │ 连续打点策略（定时 / 同点 2^n 退避）+ appendPoint
                                                ▼
                                         filesDir/location_log.jsonl
 ```
@@ -33,10 +32,10 @@
 
 | action | 方向 | 参数 / 返回 |
 |---|---|---|
-| `location.setConfig` | 页面→原生 | `{enabled, thresholdM, moveThresholdM, intervalFastMs?, intervalMidMs?, intervalSlowMs?}`；按 `enabled` 自动启停服务 |
+| `location.setConfig` | 页面→原生 | `{enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs}`；按 `enabled` 自动启停服务 |
 | `location.start` | 页面→原生 | 申请定位权限（缺省时）→ 启动服务；返回 status + `alreadyRunning` |
 | `location.stop` | 页面→原生 | 停止服务 |
-| `location.status` | 页面→原生 | `{tracking, enabled, thresholdM, moveThresholdM, startedAt, points, rev, lastPoint{ts,lat,lng,accuracy,note}}` |
+| `location.status` | 页面→原生 | `{tracking, enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs, startedAt, points, rev, lastPoint{ts,lat,lng,accuracy,note}}` |
 | `location.getHistory` | 页面→原生 | `{points:[{ts,lat,lng,accuracy,rev,...}], rev}` |
 | `location.clearHistory` | 页面→原生 | 清空记录 |
 | `location.point` | 原生→页面(事件) | 每记录一点实时推送 `{ts,lat,lng,accuracy,rev}` |
@@ -48,7 +47,9 @@
 await bridge('location.setConfig', {
   enabled: true,
   thresholdM: 5,
-  moveThresholdM: 10,
+  strategy: 'backoff', // 'fixed' = 定时；'backoff' = 同点 2^n 退避
+  intervalBaseMs: 1000,
+  intervalMaxMs: 64000,
 });
 
 // 开启 / 状态 / 历史
@@ -73,24 +74,32 @@ localStorage，因此有两路同步：
 | 字段 | 默认 | 语义 |
 |---|---|---|
 | `enabled` | false | 是否开启长期记录；true 且有定位权限时自动启动服务 |
-| `thresholdM` | 5 | 去重阈值（米）；非数字/负数按 0（不去重，每秒落点） |
-| `moveThresholdM` | 10 | 「定位动」判定位移阈值（米），驱动 1s 快速档 |
-| `intervalFastMs` | 1000 | 定位动：1s |
-| `intervalMidMs` | 30000 | 手机动+定位不动：30s |
-| `intervalSlowMs` | 60000 | 手机不动+定位不动：60s |
+| `thresholdM` | 5 | 去重阈值（米）；非数字/负数按 0（不去重，每次取点都落点） |
+| `strategy` | `backoff` | 连续打点策略：`fixed` 定时；`backoff` 同点 2^n 退避 |
+| `intervalBaseMs` | 1000 | 基准间隔：fixed 的固定周期 / backoff 的 2^0 档 |
+| `intervalMaxMs` | 64000 | backoff 封顶；默认 64s（n=6 起不再翻倍） |
+| `moveThresholdM` | 10 | **旧字段（壳 ≤1.0.1）**：驱动 1s/30s/60s 三档；新壳只解析不再使用 |
 
-## 4. 频率状态机（原生实现）
+> 旧字段保留解析，是为了「新页面 + 旧壳」和「旧页面 + 新壳」两种组合都不报错；
+> 新壳的调度完全由 `strategy` / `intervalBaseMs` / `intervalMaxMs` 决定。
 
-- **定位动**：本次定位与上一次原始定位的 haversine 距离 `> moveThresholdM` → 1s 档。
-- **手机动**：加速度计三轴变化幅度 `> 0.4 m/s²` 记为动，动窗口 1.5s → 30s 档（叠加在
-  「定位不动」之上）。
-- **都不动** → 60s 档。
+## 4. 连续打点策略（原生实现）
 
-实现：`Handler` 定时器按当前间隔调度；每次 tick `requestSingleUpdate` 取一次定位；
-收到 fix 后评估状态 → `scheduleNext(nextInterval())`。定位请求带看门狗
-（interval + 800ms 无回调则跳过），GPS 信号差不会卡死循环。
-传感器用 `TYPE_ACCELEROMETER`（SENSOR_DELAY_NORMAL），作为陀螺仪的功耗近似；
-要更准可换成 `TYPE_GYROSCOPE`，判定逻辑不变。
+页面与壳共用同一份规则（网页 `locationAuto.ts` 的 `nextSampleMs()`）：
+
+- **fixed**：每次等 `intervalBaseMs`（默认 1s）。
+- **backoff**：设 `n` = 「连续落在同一个点的次数」（去重命中即 +1，新增点归零），
+  下一次等待 `min(intervalBaseMs × 2^n, intervalMaxMs)`。
+  默认参数下序列是 1, 1, 1, 2, 4, 8, 16, 32, 64, 64, 64… 秒。
+  一旦位移超过 `thresholdM` 产生新点，`n` 立刻归零，回到 1s —— 走动时轨迹是密的，
+  只有真的不动才逐步放慢。
+
+实现：`Handler` 定时器按 `nextInterval()` 调度；每次 tick `requestSingleUpdate` 取一次
+定位；收到 fix 后 `appendPoint()` 返回是否新增 → 更新 `mSameCount` → 排下一次。定位请求
+带看门狗（interval + 800ms 无回调则跳过），GPS 信号差不会卡死循环。
+
+> v1.1.0 起移除了加速度计与 1s/30s/60s 三档：频率只由「是否还在同一个点」决定，
+> 网页/壳看到的行为完全一致。
 
 ## 5. appendPoint 原生复刻（与网页语义一一对应）
 
@@ -141,15 +150,15 @@ localStorage，因此有两路同步：
 - `START_STICKY`：服务被系统杀后自动重启；`onStartCommand(intent==null)` 走恢复分支，
   从文件尾部恢复 lastPoint/rev/points 后继续。
 - 常驻通知（渠道 `location_tracking`，含「停止」动作）。
-- `enabled=false` 或 `location.stop` → `stopTracking()` 注销传感器、停定时器、`stopForeground`。
+- `enabled=false` 或 `location.stop` → `stopTracking()` 停定时器、`stopForeground`。
 
 ## 8. 测试要点
 
 | 场景 | 预期 |
 |---|---|
 | 页面加载后（dr.autoLocation.enabled=true 且已授权） | 通知出现「正在记录位置」，`location.status` tracking=true |
-| 静止场景 | 日志间隔接近 60s；点之间 haversine < 阈值则只刷新 ts/accuracy |
-| 走动场景 | 间隔切到 1s；位移超过 moveThresholdM 的每次 fix 都新增点 |
+| 静止场景 | 间隔按 1→2→4→…→64s 递增并在 64s 停住；点之间 haversine < 阈值则只刷新 ts/accuracy |
+| 走动场景 | 每次位移产生新点，间隔回到 1s；轨迹点密 |
 | 切后台 / 锁屏 5 分钟 | 服务仍在采集（通知常驻），重开页面 `getHistory` 能补齐 |
 | 杀掉 App 再开 | START_STICKY 重启续记；末行恢复不重复 |
 | `clearHistory` | 文件清空、rev=0、points=0 |
@@ -166,7 +175,7 @@ localStorage，因此有两路同步：
 | 文件 | 职责 |
 |---|---|
 | `jsbridge/LocationConfig.java` | 配置模型 + SharedPreferences 镜像 + JSON 规范化 |
-| `jsbridge/LocationTrackingService.java` | 前台服务：状态机、传感器、appendPoint、JSONL 落盘 |
+| `jsbridge/LocationTrackingService.java` | 前台服务：连续打点调度、appendPoint、JSONL 落盘 |
 | `jsbridge/LocationBridge.java` | location.* 桥路由 + 权限申请 + 后台权限引导 |
 | `jsbridge/JsBridge.java` | 路由接入（`location.` 前缀）、PERM_LOCATION |
 | `WebViewActivity.java` | onPageFinished 拉取 dr.autoLocation 同步原生 |

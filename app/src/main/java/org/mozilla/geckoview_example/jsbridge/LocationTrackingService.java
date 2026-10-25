@@ -10,10 +10,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorManager;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -45,11 +41,13 @@ import java.util.List;
  * design: while the page is visible it records via watchPosition itself; once
  * the page cannot run, this service takes over.
  *
- * <p>The frequency state machine mirrors the page spec:</p>
+ * <p>Sampling strategy mirrors the page (locationAuto.ts, strategy in the pushed
+ * config):</p>
  * <ul>
- *   <li>location moving (last fix moved more than moveThresholdM) -&gt; 1s</li>
- *   <li>phone moving (accelerometer) + location still -&gt; 30s</li>
- *   <li>nothing moving -&gt; 60s</li>
+ *   <li>fixed - sample every intervalBaseMs.</li>
+ *   <li>backoff - after n consecutive fixes merged into the same point, wait
+ *       intervalBaseMs * 2^n, capped at intervalMaxMs (defaults 1s → 64s). A new
+ *       point resets n to 0, so moving keeps the 1s cadence.</li>
  * </ul>
  *
  * <p>Deduplication mirrors the page's appendPoint(): a new fix is compared only
@@ -73,12 +71,11 @@ public class LocationTrackingService extends Service {
   /** Persist throttle for time-only refreshes (page FLUSH_MS = 15000). */
   private static final long FLUSH_MS = 15000;
 
-  /** Accelerometer magnitude-change threshold to treat the phone as "moving". */
-  private static final double SENSOR_MOVE_THRESHOLD = 0.4; // m/s^2 change
-  /** How long a detected movement keeps the "moving" flag alive. */
-  private static final long SENSOR_MOVE_WINDOW_MS = 1500;
   /** Location fix watchdog: if no fix arrives within interval+slack, retry. */
   private static final long FIX_WATCHDOG_SLACK_MS = 800;
+
+  /** Exponent clamp for the backoff (2^16 * 1s already far beyond any cap). */
+  private static final int MAX_BACKOFF_N = 16;
 
   /** Bridge-facing listener (set by LocationBridge) for events. */
   public interface Listener {
@@ -178,53 +175,19 @@ public class LocationTrackingService extends Service {
   // ---------------------------------------------------------------------------
 
   private final Handler mHandler = new Handler(Looper.getMainLooper());
-  private SensorManager mSensorManager;
-  @Nullable private Sensor mAccelerometer;
-  private final SensorEventListener mSensorListener = new SensorEventListener() {
-    private float mLastX, mLastY, mLastZ;
-    private boolean mHasLast;
 
-    @Override
-    public void onSensorChanged(SensorEvent event) {
-      float x = event.values[0];
-      float y = event.values[1];
-      float z = event.values[2];
-      if (mHasLast) {
-        double dx = x - mLastX;
-        double dy = y - mLastY;
-        double dz = z - mLastZ;
-        double delta = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (delta > SENSOR_MOVE_THRESHOLD) {
-          mMoveUntil = System.currentTimeMillis() + SENSOR_MOVE_WINDOW_MS;
-        }
-      }
-      mLastX = x;
-      mLastY = y;
-      mLastZ = z;
-      mHasLast = true;
-    }
-
-    @Override
-    public void onAccuracyChanged(Sensor sensor, int accuracy) {
-      // ignore
-    }
-  };
-  private volatile long mMoveUntil = 0;
+  /** Consecutive fixes merged into the same point; backoff exponent n. */
+  private int mSameCount = 0;
 
   private LocationManager mLocationManager;
   private String mProvider;
-  private boolean mHasLastRaw = false;
-  private double mLastRawLat;
-  private double mLastRawLng;
-  /** Distance of the most recent fix from the one before it. */
-  private double mLastMoveDist = 0;
 
   /** Last appended point (dedupe baseline), mirrors page rows[last]. */
   @Nullable private JSONObject mLastPoint;
   private long mLastPersistTs = 0;
   private File mLogFile;
   private boolean mPendingFix = false;
-  private long mCurrentIntervalMs = 60000;
+  private long mCurrentIntervalMs = 1000;
   private boolean mStopping = false;
 
   private final Runnable mTick = this::onTick;
@@ -256,9 +219,6 @@ public class LocationTrackingService extends Service {
   @Override
   public void onCreate() {
     super.onCreate();
-    mSensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
-    mAccelerometer =
-        mSensorManager != null ? mSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) : null;
     mLocationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
     mProvider = pickProvider();
     mLogFile = new File(getFilesDir(), FILE_NAME);
@@ -303,16 +263,11 @@ public class LocationTrackingService extends Service {
     sRunning = true;
     sStartedAt = System.currentTimeMillis();
 
-    if (mAccelerometer != null && mSensorManager != null) {
-      mSensorManager.registerListener(
-          mSensorListener, mAccelerometer, SensorManager.SENSOR_DELAY_NORMAL);
-    }
-    mHasLastRaw = false;
-    mLastMoveDist = 0;
-    mCurrentIntervalMs = sConfig.intervalSlowMs;
+    mSameCount = 0;
+    mCurrentIntervalMs = sConfig.intervalBaseMs;
     mHandler.removeCallbacks(mTick);
     mHandler.postDelayed(mTick, 0);
-    Log.i(LOGTAG, "tracking started, interval=" + mCurrentIntervalMs + "ms");
+    Log.i(LOGTAG, "tracking started, strategy=" + sConfig.strategy + " interval=" + mCurrentIntervalMs + "ms");
   }
 
   private void stopTracking() {
@@ -324,12 +279,6 @@ public class LocationTrackingService extends Service {
     mHandler.removeCallbacks(mTick);
     mHandler.removeCallbacks(mFixWatchdog);
     mPendingFix = false;
-    if (mSensorManager != null) {
-      try {
-        mSensorManager.unregisterListener(mSensorListener);
-      } catch (Exception ignored) {
-      }
-    }
     Log.i(LOGTAG, "tracking stopped, points=" + sPoints + " rev=" + sRev);
     stopForeground(STOP_FOREGROUND_REMOVE);
     stopSelf();
@@ -376,16 +325,6 @@ public class LocationTrackingService extends Service {
     long ts = location.getTime();
     float accuracy = location.getAccuracy();
 
-    // Movement state machine: distance of this fix from the previous raw fix.
-    if (mHasLastRaw) {
-      mLastMoveDist = haversineMeters(mLastRawLat, mLastRawLng, lat, lng);
-    } else {
-      mLastMoveDist = 0;
-    }
-    mLastRawLat = lat;
-    mLastRawLng = lng;
-    mHasLastRaw = true;
-
     JSONObject point = new JSONObject();
     try {
       point.put("ts", ts);
@@ -398,7 +337,9 @@ public class LocationTrackingService extends Service {
       return;
     }
 
-    appendPoint(point);
+    // 新点：同点连击归零；合并：n+1，下一次等待翻倍
+    boolean added = appendPoint(point);
+    mSameCount = added ? 0 : mSameCount + 1;
 
     if (sListener != null) {
       try {
@@ -410,15 +351,20 @@ public class LocationTrackingService extends Service {
     scheduleNext(nextInterval());
   }
 
-  /** Next interval by current state (page frequency state machine). */
+  /**
+   * Next interval by the page's continuous-sampling strategy (locationAuto.ts
+   * nextSampleMs): fixed = base; backoff = base * 2^n capped at max.
+   */
   private long nextInterval() {
-    if (mLastMoveDist > sConfig.moveThresholdM) {
-      return sConfig.intervalFastMs; // location moving -> 1s
+    if (LocationConfig.STRATEGY_FIXED.equals(sConfig.strategy)) {
+      return sConfig.intervalBaseMs;
     }
-    if (System.currentTimeMillis() < mMoveUntil) {
-      return sConfig.intervalMidMs; // phone moving, location still -> 30s
+    int n = Math.min(Math.max(0, mSameCount), MAX_BACKOFF_N);
+    long ms = sConfig.intervalBaseMs;
+    for (int i = 0; i < n && ms < sConfig.intervalMaxMs; i++) {
+      ms *= 2;
     }
-    return sConfig.intervalSlowMs; // nothing moving -> 60s
+    return Math.min(ms, sConfig.intervalMaxMs);
   }
 
   private void scheduleNext(long intervalMs) {
@@ -446,11 +392,13 @@ public class LocationTrackingService extends Service {
    * Compare only with the last recorded point (haversine). Inside the threshold:
    * merge (refresh ts + accuracy, keep coordinates/note), do not add, rev stays.
    * Outside (or threshold 0): append a new point, rev++, persist immediately.
+   *
+   * @return true if a new point was appended, false if merged into the last one
    */
-  private void appendPoint(JSONObject point) {
+  private boolean appendPoint(JSONObject point) {
     if (mLastPoint == null) {
       addPoint(point);
-      return;
+      return true;
     }
     try {
       double distM =
@@ -466,11 +414,13 @@ public class LocationTrackingService extends Service {
         mLastPoint.put("accuracy", point.getDouble("accuracy"));
         updateLastPointStatics(mLastPoint);
         maybePersistTimeRefresh();
-        return;
+        return false;
       }
       addPoint(point);
+      return true;
     } catch (Exception e) {
       Log.e(LOGTAG, "appendPoint failed", e);
+      return false;
     }
   }
 
@@ -657,12 +607,6 @@ public class LocationTrackingService extends Service {
       sRunning = false;
       mHandler.removeCallbacks(mTick);
       mHandler.removeCallbacks(mFixWatchdog);
-      if (mSensorManager != null) {
-        try {
-          mSensorManager.unregisterListener(mSensorListener);
-        } catch (Exception ignored) {
-        }
-      }
     }
     if (sInstance == this) {
       sInstance = null;

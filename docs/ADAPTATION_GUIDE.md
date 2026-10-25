@@ -8,7 +8,7 @@
 > 麦克风录音、定位。
 >
 > 适用工程：`geckoview_example_app/`（GitHub: `git@github.com:totooicu/geckoview_example.git`）
-> 当前版本：v1.0.1（WebView 方案）
+> 当前版本：v1.1.0（WebView 方案）
 
 ---
 
@@ -50,7 +50,7 @@ flowchart LR
 
 | 要改的东西 | 位置 | 说明 |
 |---|---|---|
-| **目标网页地址** | `WebViewActivity.java` → `DEFAULT_URL` | 改成你的页面；**指向冻结快照而不是根路径**（见 §3.1 末尾） |
+| **目标网页地址** | `WebViewActivity.java` → `DEFAULT_URL` | 改成你的页面；当前策略是站点根路径（见 §3.1 末尾） |
 | **允许的域名** | `WebViewActivity.java` → `ALLOWED_HOST` | 域名锁；页面内所有跳转只允许此域 |
 | **应用名** | `app/src/main/res/values/strings.xml` → `app_name` | 桌面显示名 |
 | **图标** | `app/src/main/res/drawable/logo.png` | 应用图标 |
@@ -99,10 +99,13 @@ function getEnv() {
 
 用途：在本 App 内 → 调用原生桥（蓝牙/文件/录屏）；在普通浏览器 → 用 Web 标准 API（Web Bluetooth、File System Access 等）或提示下载 App。
 
-**`DEFAULT_URL` 要指向发布快照，不要指向站点根路径**：根路径跟着网页的 `main` 走，
-一次部署就变；壳装到手机上收不回来，指向根路径等于没锁版本。约定是
-`https://<站点>/<仓库>/releases/v<大版本>/`，由网页仓库的 release 流水线在打 `v1.x`
-tag 时写入，日常部署会保留它（见网页仓库 `RELEASE.md`）。
+**`DEFAULT_URL` 当前指向站点根路径**（v1.1.0 起）：<br>
+`https://totooicu.github.io/DatingRecord/`。根路径跟着网页 `main` 走，网页修 bug 不必再发壳；
+代价是壳里的页面会随网页发版变化，排查问题时先看「版本配对」卡里的网页版本。
+
+如需锁死版本，可指向网页仓库的冻结快照 `https://<站点>/<仓库>/releases/v<大版本>/`：它由
+release 流水线在打 `v1.x` tag 时写入，日常部署会保留。两种策略二选一，别混着用
+（见 `docs/RELEASE_GUIDE.md` 第二节、网页仓库 `RELEASE.md`）。
 
 ### 3.2 请求-响应协议（核心）
 

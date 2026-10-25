@@ -19,10 +19,13 @@ import org.json.JSONObject;
  * <ul>
  *   <li>thresholdM: dedupe distance in meters; non-number or negative is normalized
  *       to 0 (no dedupe, record every fix). Default 5.</li>
- *   <li>moveThresholdM: distance that counts as "location is moving", driving the
- *       1s fast frequency. Taken from the page config; default 10.</li>
- *   <li>intervalFastMs / intervalMidMs / intervalSlowMs: 1s / 30s / 60s defaults,
+ *   <li>strategy: "fixed" or "backoff". fixed records every intervalBaseMs; backoff
+ *       waits intervalBaseMs * 2^n after n consecutive fixes merged into the same
+ *       point (n resets on every new point), capped at intervalMaxMs.</li>
+ *   <li>intervalBaseMs / intervalMaxMs: 1000 / 64000 defaults (i.e. 1→2→4→…→64s),
  *       overridable by the page config.</li>
+ *   <li>moveThresholdM: legacy from shell &lt;= 1.0.1 (its 1s/30s/60s tiers). Still
+ *       parsed so old pages keep sending it; no longer drives scheduling.</li>
  * </ul>
  */
 public class LocationConfig {
@@ -31,23 +34,26 @@ public class LocationConfig {
   public static final String PREF_NAME = "dr_location_config";
   private static final String KEY_JSON = "json";
 
+  public static final String STRATEGY_FIXED = "fixed";
+  public static final String STRATEGY_BACKOFF = "backoff";
+
   /** Whether long-running tracking is enabled (from page config enabled field). */
   public volatile boolean enabled = false;
 
   /** Dedupe threshold in meters; 0 = record every fix. Default 5. */
   public volatile double thresholdM = 5;
 
-  /** Distance (m) that marks "location moving" -> fast 1s interval. Default 10. */
-  public volatile double moveThresholdM = 10;
+  /** @deprecated legacy "movement" gate of the 1s/30s/60s tiers; kept for old pages. */
+  @Deprecated public volatile double moveThresholdM = 10;
 
-  /** Fast interval (location moving). */
-  public volatile long intervalFastMs = 1000;
+  /** Sampling strategy: fixed or backoff. Default backoff (same-point doubling). */
+  public volatile String strategy = STRATEGY_BACKOFF;
 
-  /** Mid interval (phone moving, location still). */
-  public volatile long intervalMidMs = 30000;
+  /** Base interval: delay after a new point / fixed-mode cadence. */
+  public volatile long intervalBaseMs = 1000;
 
-  /** Slow interval (nothing moving). */
-  public volatile long intervalSlowMs = 60000;
+  /** Ceiling of the exponential backoff. */
+  public volatile long intervalMaxMs = 64000;
 
   /** Parse from the page's dr.autoLocation JSON; missing fields keep defaults. */
   public static LocationConfig fromJson(String json) {
@@ -62,13 +68,22 @@ public class LocationConfig {
       }
       cfg.thresholdM = normalizeNonNegative(o, "thresholdM", 5);
       cfg.moveThresholdM = normalizePositive(o, "moveThresholdM", 10.0);
-      cfg.intervalFastMs = normalizePositive(o, "intervalFastMs", 1000L);
-      cfg.intervalMidMs = normalizePositive(o, "intervalMidMs", 30000L);
-      cfg.intervalSlowMs = normalizePositive(o, "intervalSlowMs", 60000L);
+      cfg.strategy = normalizeStrategy(o, "strategy", STRATEGY_BACKOFF);
+      cfg.intervalBaseMs = normalizePositive(o, "intervalBaseMs", 1000L);
+      cfg.intervalMaxMs = normalizePositive(o, "intervalMaxMs", 64000L);
+      if (cfg.intervalMaxMs < cfg.intervalBaseMs) {
+        cfg.intervalMaxMs = cfg.intervalBaseMs;
+      }
     } catch (Exception e) {
       Log.w(LOGTAG, "fromJson failed: " + e.getMessage());
     }
     return cfg;
+  }
+
+  /** Unknown / missing strategy -> backoff (the page's default). */
+  private static String normalizeStrategy(JSONObject o, String key, String def) {
+    String v = o.optString(key, def);
+    return STRATEGY_FIXED.equals(v) ? STRATEGY_FIXED : STRATEGY_BACKOFF;
   }
 
   /** thresholdM: non-number or negative -> 0 (dedupe disabled). */
@@ -112,9 +127,9 @@ public class LocationConfig {
       o.put("enabled", enabled);
       o.put("thresholdM", thresholdM);
       o.put("moveThresholdM", moveThresholdM);
-      o.put("intervalFastMs", intervalFastMs);
-      o.put("intervalMidMs", intervalMidMs);
-      o.put("intervalSlowMs", intervalSlowMs);
+      o.put("strategy", strategy);
+      o.put("intervalBaseMs", intervalBaseMs);
+      o.put("intervalMaxMs", intervalMaxMs);
       context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
           .edit()
           .putString(KEY_JSON, o.toString())

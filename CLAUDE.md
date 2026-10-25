@@ -36,7 +36,7 @@
 
 ## 铁律四：与网页语义严格对齐
 
-- 定位三件套——**appendPoint 去重、频率状态机、rev 语义**——与网页 `locationAuto.ts`
+- 定位三件套——**appendPoint 去重、连续打点策略、rev 语义**——与网页 `locationAuto.ts`
   一一对应；改原生算法前先读网页实现，**两边不一致就是 bug**。
 - **配置权威在网页**：`localStorage` 的 `dr.autoLocation` 是唯一来源，原生只经
   SharedPreferences 镜像；不许发明平行配置源，不许让原生配置反过来覆盖网页。

@@ -336,9 +336,9 @@ public class WebViewActivity extends AppCompatActivity {
       o.put("enabled", cfg.enabled);
       o.put("thresholdM", cfg.thresholdM);
       o.put("moveThresholdM", cfg.moveThresholdM);
-      o.put("intervalFastMs", cfg.intervalFastMs);
-      o.put("intervalMidMs", cfg.intervalMidMs);
-      o.put("intervalSlowMs", cfg.intervalSlowMs);
+      o.put("strategy", cfg.strategy);
+      o.put("intervalBaseMs", cfg.intervalBaseMs);
+      o.put("intervalMaxMs", cfg.intervalMaxMs);
       return o.toString();
     } catch (Exception e) {
       return "{}";
