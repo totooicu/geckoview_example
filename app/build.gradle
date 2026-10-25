@@ -12,14 +12,18 @@ android {
         applicationId "org.mozilla.geckoview_example"
         minSdk 26
         targetSdk 36
-        versionCode 2
-        versionName "0.2.1"
+        versionCode 3
+        versionName "1.0.0"
     }
 
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // 用同一把钥匙签 release：换钥匙等于换 App——已装的版本无法升级，
+            // 只能卸载重装，而卸载会连同 WebView 里的本地数据一起清掉。
+            // v1.0.0 起钥匙固定，密钥文件由用户保管、不进库。
+            signingConfig signingConfigs.debug
         }
     }
 

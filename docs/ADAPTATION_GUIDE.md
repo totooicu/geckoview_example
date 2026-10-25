@@ -5,7 +5,7 @@
 > 麦克风录音、定位。
 >
 > 适用工程：`geckoview_example_app/`（GitHub: `git@github.com:totooicu/geckoview_example.git`）
-> 当前版本：v0.2.1（WebView 方案）
+> 当前版本：v1.0.0（WebView 方案）
 
 ---
 
@@ -87,8 +87,12 @@ function getEnv() {
   return null; // 普通浏览器（Chrome/微信/...）
 }
 
-// 返回示例：{"app":"DatingRecord","version":"0.2.0","platform":"android","isApp":true,"bridge":"jsi-v1"}
+// 返回示例：{"app":"DatingRecord","version":"1.0.0","platform":"android","isApp":true,"bridge":"jsi-v1","proto":1}
 ```
+
+`version` 是壳版本，`proto` 是桥协议版本：网页用这两个数判断能不能配对（网页侧
+`core/compat/pairing.ts` + 适配测试的「版本配对」卡片，发版纪律见网页仓库 `RELEASE.md`）。
+**桥只增不删**——加 `action` 不用升 `proto`，删 `action` 或改参数语义必须升，并且与网页同版本发布。
 
 用途：在本 App 内 → 调用原生桥（蓝牙/文件/录屏）；在普通浏览器 → 用 Web 标准 API（Web Bluetooth、File System Access 等）或提示下载 App。
 
@@ -270,8 +274,9 @@ window.addEventListener('message', (e) => {
    `grant()` 抛 `IllegalStateException`，现在的实现提示「放行失败」而不是让壳崩掉。
    **放行前壳会先做一次麦克风自检**（`MicDiagnostics`，原生录 0.2 秒后立刻释放），
    弹窗给出 `RECORD_AUDIO` 权限 / AppOps 状态 / 系统静音开关 / WebView 内核版本 /
-   两路音源的探测结果。页面报 `NotReadableError` 时先看这份报告：原生也录不到 = 系统
-   没把麦克风给这个 App（AppOps 被关，弹窗里有「去设置」）；原生能录 = 内核音频路径的问题。
+   两路音源的探测结果。**只有真出问题才弹窗**（两路都没拿到数据，或 AppOps 被关），
+   正常录音不会被诊断打断。页面报 `NotReadableError` 时先看这份报告：原生也录不到 =
+   系统没把麦克风给这个 App（弹窗里有「去设置」）；原生能录 = 内核音频路径的问题。
 3. **录屏授权**（特殊）：`screen.start` 时调起系统「媒体投影」授权对话框（Android 14+ 会有两次确认）。
 
 ### 5.3 Android 14+ 录屏的三个必踩坑（均已修好，适配时勿回退）

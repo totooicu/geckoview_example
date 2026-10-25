@@ -121,6 +121,9 @@ public class JsBridge {
       o.put("platform", "android");
       o.put("isApp", true);
       o.put("bridge", "jsi-v1");
+      // 桥协议版本：网页靠它判断壳能不能配对（见网页 RELEASE.md）。
+      // 只增不删的改动不用升；删 action / 改参数语义必须升，并与网页同版本发布。
+      o.put("proto", 1);
       return o.toString();
     } catch (Exception e) {
       return "{}";

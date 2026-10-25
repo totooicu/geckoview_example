@@ -3,7 +3,6 @@ package org.mozilla.geckoview_example;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.app.AppOpsManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -446,36 +445,39 @@ public class WebViewActivity extends AppCompatActivity {
     }
     new Thread(
             () -> {
-              int op = -1;
-              String report;
+              MicDiagnostics.Result res;
               try {
-                op = MicDiagnostics.audioOpMode(this);
-                report = MicDiagnostics.collect(this);
+                res = MicDiagnostics.collect(this);
               } catch (Throwable e) {
                 Log.w(LOGTAG, "mic self-check failed", e);
-                report = "自检失败：" + e;
+                grantMediaOnUi(req);
+                return;
               }
-              final int opMode = op;
-              final String text = report;
-              Log.i(LOGTAG, "mic self-check:\n" + text);
+              Log.i(LOGTAG, "mic self-check:\n" + res.report);
               runOnUiThread(
                   () -> {
                     grantMedia(req);
-                    // 让页面的 getUserMedia 先跑完，再把报告盖上来
-                    mMainHandler.postDelayed(() -> showMicReport(text, opMode), 900);
+                    // 只有真出问题才弹窗（自检两路都没拿到数据 / AppOps 被关），
+                    // 平时录音不该被一个诊断弹窗打断。
+                    if (!res.ok || res.blocked) {
+                      mMainHandler.postDelayed(() -> showMicReport(res.report, res.blocked), 900);
+                    }
                   });
             },
             "mic-selfcheck")
         .start();
   }
 
+  /** 后台线程里失败时也要把请求放行，不能把页面的 getUserMedia 挂死。 */
+  private void grantMediaOnUi(PermissionRequest req) {
+    runOnUiThread(() -> grantMedia(req));
+  }
+
   /** 自检报告弹窗：可选中、可复制，AppOps 被关时给一条去系统设置的直路。 */
-  private void showMicReport(String report, int opMode) {
+  private void showMicReport(String report, boolean blocked) {
     if (isFinishing() || isDestroyed()) {
       return;
     }
-    boolean blocked =
-        opMode == AppOpsManager.MODE_IGNORED || opMode == AppOpsManager.MODE_ERRORED;
     StringBuilder msg = new StringBuilder(report);
     if (blocked) {
       msg.append("\n\n系统把本 App 的麦克风关掉了（AppOps=被关掉）：去「设置 → 应用 → ")
