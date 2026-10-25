@@ -55,8 +55,13 @@ import java.util.Map;
 public class WebViewActivity extends AppCompatActivity {
   private static final String LOGTAG = "WebViewActivity";
 
+  /**
+   * 壳固定加载「冻结快照」，不是根路径：根路径跟着 main 走，一推送就变，壳装到手机上
+   * 收不回来，指向那里等于没锁版本。快照由网页仓库的 release-v1-pages.yml 在打
+   * v1.x tag 时写入，日常部署不会覆盖它。
+   */
   public static final String DEFAULT_URL =
-      "https://totooicu.github.io/DatingRecord/";
+      "https://totooicu.github.io/DatingRecord/releases/v1/";
 
   /** Only this host may be loaded; any other link is blocked (no external nav). */
   public static final String ALLOWED_HOST = "totooicu.github.io";
