@@ -101,7 +101,8 @@ geckoview_example/
 ├── CLAUDE.md                    本文件（项目约定）
 ├── docs/
 │   ├── ADAPTATION_GUIDE.md      换皮教程 + 桥协议全貌 + 权限坑位（改桥前必读）
-│   └── DEVELOPMENT_GUIDE.md     长期定位原生兜底服务开发文档（location.* 全貌）
+│   ├── DEVELOPMENT_GUIDE.md     长期定位原生兜底服务开发文档（location.* 全貌）
+│   └── RELEASE_GUIDE.md         壳发布手册（版本对齐 / 签名钥匙 / 出包校验 / 回滚）
 ├── app/src/main/java/org/mozilla/geckoview_example/
 │   ├── WebViewActivity.java     主壳：加载页面、注入 ADAPTER_JS、域名锁、权限、返回键
 │   └── jsbridge/
@@ -133,6 +134,8 @@ geckoview_example/
   提交时于提交信息或 docs 里记一笔。
 - **桥协议不兼容变更 = 网页与壳同版本发布**：DatingRecord 的 Pages 部署与
   APK 分发要互相等齐，别让新壳配旧网页或旧壳配新网页上线。
+- 发版照 `docs/RELEASE_GUIDE.md` 执行；配对记录的唯一真相源在网页仓库 `RELEASE.md`，
+  本仓库那份是镜像，两边同步加行。
 
 ## 环境备注
 

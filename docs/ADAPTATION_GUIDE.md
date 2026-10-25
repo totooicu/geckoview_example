@@ -1,5 +1,8 @@
 # 网页转安卓 App 适配教程（WebView 壳 + 原生桥）
 
+> 发版、签名钥匙、回滚等发布相关的事，见 `docs/RELEASE_GUIDE.md`；版本配对以网页仓库
+> `RELEASE.md` 为准。
+
 > 本文档说明如何把任意网页（如 `https://your-site.example/`）打包成安卓应用，
 > 并让网页里的 JavaScript 通过「原生桥」调用安卓能力：蓝牙、持续文件写入、录屏、
 > 麦克风录音、定位。
