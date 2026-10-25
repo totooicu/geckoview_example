@@ -38,6 +38,7 @@
 | `location.status` | 页面→原生 | `{tracking, enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs, startedAt, points, rev, lastPoint{ts,lat,lng,accuracy,note}}` |
 | `location.getHistory` | 页面→原生 | `{points:[{ts,lat,lng,accuracy,rev,...}], rev}` |
 | `location.clearHistory` | 页面→原生 | 清空记录 |
+| `location.getFix` | 页面→原生 | 一次性定位（手动「我的位置 / 打点」用）：与连续打点同一个原生 GPS 源，绕开 WebView 拦截的 `navigator.geolocation`（那条在壳里常『申请了定位却回不来坐标』）；成功回 `{lat, lng, accuracy}`（WGS-84，米，页面换算 GCJ-02），失败回 `ok:false`（如定位权限被拒、信号不可用）；缺定位权限时先弹系统权限申请，拒绝回 `ok:false`；不要静默不回，否则页面卡到超时 |
 | `location.point` | 原生→页面(事件) | 每记录一点实时推送 `{ts,lat,lng,accuracy,rev}` |
 
 页面端用法：
@@ -57,6 +58,10 @@ await bridge('location.start');
 const st = await bridge('location.status');
 const hist = await bridge('location.getHistory');
 hist.points.forEach(p => appendPoint(p)); // 复用网页去重逻辑合并
+
+// 手动一次性定位（「我的位置 / 打点」优先走这条，与连续打点同 GPS 源）
+const fix = await bridge('location.getFix');
+// fix = { lat, lng, accuracy } —— WGS-84，页面换算成 GCJ-02
 ```
 
 ## 3. 配置（dr.autoLocation）

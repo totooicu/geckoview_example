@@ -5,8 +5,14 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
 import android.widget.Toast;
@@ -31,6 +37,13 @@ import org.json.JSONObject;
  *   <li>location.getHistory — all recorded points ({points:[...], rev:N}) so the
  *       page can merge them through its own appendPoint().</li>
  *   <li>location.clearHistory — wipe the recorded points.</li>
+ *   <li>location.getFix — one-shot fix for manual "我的位置 / 打点": same native GPS
+ *       source as the continuous tracker, bypassing the WebView's
+ *       navigator.geolocation (which silently fails in this shell). Replies
+ *       {lat, lng, accuracy} on success (WGS-84 metres, page converts to GCJ-02),
+ *       or ok:false on failure (e.g. permission denied / no signal); missing
+ *       fine-location triggers the system permission prompt first, denial replies
+ *       ok:false. Never stay silent — the page would hang until its own timeout.</li>
  * </ul>
  */
 public class LocationBridge {
@@ -66,6 +79,9 @@ public class LocationBridge {
         break;
       case "location.clearHistory":
         handleClearHistory(id, bridge);
+        break;
+      case "location.getFix":
+        handleGetFix(id, bridge);
         break;
       default:
         bridge.respond(id, false, null, "unknown location action: " + action);
@@ -193,6 +209,124 @@ public class LocationBridge {
   private void handleClearHistory(String id, JsBridge bridge) {
     LocationTrackingService.clearHistory();
     bridge.respond(id, true, LocationTrackingService.statusJson(), null);
+  }
+
+  /** Manual one-shot fix: "我的位置 / 打点" prefers this over the WebView's
+   *  navigator.geolocation (which silently fails in this shell). */
+  private void handleGetFix(String id, JsBridge bridge) {
+    if (hasFineLocation()) {
+      doGetFix(id, bridge);
+      return;
+    }
+    // 缺定位权限：先弹系统权限申请（同 setConfig/start），授予后再取点；拒绝回 ok:false
+    Activity activity = bridge.activity();
+    if (activity == null) {
+      bridge.respond(id, false, null, "壳界面不可用，无法申请定位权限");
+      return;
+    }
+    JsBridge.requestPermissions(
+        activity,
+        JsBridge.PERM_LOCATION,
+        new String[] {Manifest.permission.ACCESS_FINE_LOCATION},
+        new JsBridge.PermissionCallback() {
+          @Override
+          public void onGranted() {
+            doGetFix(id, bridge);
+          }
+
+          @Override
+          public void onDenied() {
+            bridge.respond(id, false, null, "定位权限被拒绝");
+          }
+        });
+  }
+
+  /** Request a single fix directly from the system LocationManager — the same
+   *  native source the continuous tracker uses, so it works where WebView
+   *  geolocation does not. Replies WGS-84 (page converts to GCJ-02). */
+  private void doGetFix(String id, JsBridge bridge) {
+    LocationManager lm =
+        (LocationManager) mContext.getSystemService(Context.LOCATION_SERVICE);
+    if (lm == null) {
+      bridge.respond(id, false, null, "定位服务不可用");
+      return;
+    }
+    final String provider = pickProvider(lm);
+
+    // Single one-shot listener + timeout so the page never hangs waiting.
+    final LocationListener[] oneShot = new LocationListener[1];
+    final Handler handler = new Handler(Looper.getMainLooper());
+    final Runnable timeout =
+        () -> {
+          if (oneShot[0] != null) {
+            try {
+              lm.removeUpdates(oneShot[0]);
+            } catch (Exception ignored) {
+            }
+          }
+          bridge.respond(id, false, null, "定位超时");
+        };
+
+    oneShot[0] =
+        new LocationListener() {
+          @Override
+          public void onLocationChanged(Location location) {
+            try {
+              lm.removeUpdates(this);
+            } catch (Exception ignored) {
+            }
+            handler.removeCallbacks(timeout);
+            try {
+              // LocationManager 给的是 WGS-84，页面会换算成 GCJ-02
+              JSONObject r = new JSONObject();
+              r.put("lat", location.getLatitude());
+              r.put("lng", location.getLongitude());
+              r.put("accuracy", location.hasAccuracy() ? location.getAccuracy() : 0);
+              bridge.respond(id, true, r, null);
+            } catch (Exception e) {
+              bridge.respond(id, false, null, "getFix: " + e.getMessage());
+            }
+          }
+
+          @Override
+          public void onStatusChanged(String p, int s, Bundle e) {}
+
+          @Override
+          public void onProviderEnabled(String p) {}
+
+          @Override
+          public void onProviderDisabled(String p) {
+            try {
+              lm.removeUpdates(this);
+            } catch (Exception ignored) {
+            }
+            handler.removeCallbacks(timeout);
+            bridge.respond(id, false, null, "定位已被关闭");
+          }
+        };
+
+    try {
+      lm.requestSingleUpdate(provider, oneShot[0], Looper.getMainLooper());
+    } catch (SecurityException | IllegalArgumentException e) {
+      bridge.respond(id, false, null, "getFix: " + e.getMessage());
+      return;
+    }
+    // 比页面 9s 超时略短，先回错误让页面降级，避免两边同时超时
+    handler.postDelayed(timeout, 8000);
+  }
+
+  /** Pick the best-enabled provider, mirroring LocationTrackingService.pickProvider. */
+  private static String pickProvider(LocationManager lm) {
+    try {
+      if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+        return LocationManager.GPS_PROVIDER;
+      }
+      if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+        return LocationManager.NETWORK_PROVIDER;
+      }
+    } catch (Exception ignored) {
+    }
+    return LocationManager.GPS_PROVIDER;
   }
 
   /* ----------------------------------------------------------------------------

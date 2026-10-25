@@ -135,6 +135,9 @@ public class WebViewActivity extends AppCompatActivity {
 
     WebSettings s = mWebView.getSettings();
     s.setJavaScriptEnabled(true);
+    // 必须显式开启，否则 navigator.geolocation.getCurrentPosition 会静默失败 / 卡住
+    // （表现为网页调了定位、壳弹了「正在使用定位」提示却回不来坐标）。
+    s.setGeolocationEnabled(true);
     s.setDomStorageEnabled(true);
     s.setMediaPlaybackRequiresUserGesture(false);
     // Identify this custom browser to the web page via a distinct User-Agent
