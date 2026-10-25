@@ -22,7 +22,9 @@ import org.json.JSONObject;
  * <ul>
  *   <li>location.setConfig {enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs}
  *       — page pushes its dr.autoLocation config; native saves it and auto-starts/stops
- *       the service when enabled toggles (needs fine-location permission).</li>
+ *       the service when enabled toggles. When enabled but fine-location is missing,
+ *       the system permission dialog is requested first (like location.start); on
+ *       denial the reply is ok:false so the page can fall back to its own timer.</li>
  *   <li>location.start — request permissions and start the foreground service.</li>
  *   <li>location.stop — stop the service.</li>
  *   <li>location.status — {tracking, startedAt, points, rev, lastPoint}.</li>
@@ -83,10 +85,46 @@ public class LocationBridge {
       if (cfg.enabled) {
         if (hasFineLocation()) {
           startService();
+          respondSetConfig(id, cfg, bridge);
+        } else {
+          // 没有定位权限时不静默跳过（铁律六：权限被拒要降级可解释）：
+          // 复用 location.start 的系统权限申请路径。授予后起服务并回复
+          // tracking:true；拒绝则回复 ok:false，让网页退回页面定时器并提示用户。
+          Activity activity = bridge.activity();
+          if (activity == null) {
+            bridge.respond(id, false, null, "壳界面不可用，无法申请定位权限");
+            return;
+          }
+          JsBridge.requestPermissions(
+              activity,
+              JsBridge.PERM_LOCATION,
+              new String[] {Manifest.permission.ACCESS_FINE_LOCATION},
+              new JsBridge.PermissionCallback() {
+                @Override
+                public void onGranted() {
+                  maybeGuideBackgroundPermission();
+                  startService();
+                  respondSetConfig(id, cfg, bridge);
+                }
+
+                @Override
+                public void onDenied() {
+                  bridge.respond(id, false, null, "定位权限被拒绝");
+                }
+              });
         }
       } else {
         stopService();
+        respondSetConfig(id, cfg, bridge);
       }
+    } catch (Exception e) {
+      Log.e(LOGTAG, "setConfig failed", e);
+      bridge.respond(id, false, null, "setConfig: " + e.getMessage());
+    }
+  }
+
+  private void respondSetConfig(String id, LocationConfig cfg, JsBridge bridge) {
+    try {
       JSONObject r = new JSONObject();
       r.put("enabled", cfg.enabled);
       r.put("thresholdM", cfg.thresholdM);
@@ -97,7 +135,7 @@ public class LocationBridge {
       r.put("tracking", LocationTrackingService.isRunning());
       bridge.respond(id, true, r, null);
     } catch (Exception e) {
-      Log.e(LOGTAG, "setConfig failed", e);
+      Log.e(LOGTAG, "respondSetConfig failed", e);
       bridge.respond(id, false, null, "setConfig: " + e.getMessage());
     }
   }

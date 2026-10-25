@@ -32,7 +32,7 @@
 
 | action | 方向 | 参数 / 返回 |
 |---|---|---|
-| `location.setConfig` | 页面→原生 | `{enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs}`；按 `enabled` 自动启停服务 |
+| `location.setConfig` | 页面→原生 | `{enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs}`；按 `enabled` 自动启停服务；`enabled` 但缺定位权限时先弹系统权限申请（同 `location.start`），拒绝回 `ok:false`（不静默跳过） |
 | `location.start` | 页面→原生 | 申请定位权限（缺省时）→ 启动服务；返回 status + `alreadyRunning` |
 | `location.stop` | 页面→原生 | 停止服务 |
 | `location.status` | 页面→原生 | `{tracking, enabled, thresholdM, strategy, intervalBaseMs, intervalMaxMs, startedAt, points, rev, lastPoint{ts,lat,lng,accuracy,note}}` |
@@ -73,7 +73,7 @@ localStorage，因此有两路同步：
 
 | 字段 | 默认 | 语义 |
 |---|---|---|
-| `enabled` | false | 是否开启长期记录；true 且有定位权限时自动启动服务 |
+| `enabled` | false | 是否开启长期记录；true 且有定位权限时自动启动服务；true 但缺权限时弹系统权限申请，用户拒绝则 `ok:false` 由网页降级 |
 | `thresholdM` | 5 | 去重阈值（米）；非数字/负数按 0（不去重，每次取点都落点） |
 | `strategy` | `backoff` | 连续打点策略：`fixed` 定时；`backoff` 同点 2^n 退避 |
 | `intervalBaseMs` | 1000 | 基准间隔：fixed 的固定周期 / backoff 的 2^0 档 |

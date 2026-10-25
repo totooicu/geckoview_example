@@ -148,6 +148,8 @@ window.addEventListener('message', (e) => {
 
 > 桥由 App 在 `onPageStarted` / `onPageFinished` 注入适配脚本自动接通，页面无需等待标记，首次调用前 `await bridge('ping')` 即可自检。
 
+> **`location.setConfig` 的权限时序**：`enabled:true` 但缺定位权限时，壳会先弹系统权限申请（与 `location.start` 同一条路径），用户的授权结果决定应答——因此这一次桥调用的 resolve/reject 可能**延迟到权限弹窗有了结果之后**；用户拒绝时回 `ok:false`（不静默跳过），页面应据此降级（如退回页面自己的定时器）。
+
 ### 3.3 常用调用示例
 
 ```js
@@ -278,7 +280,7 @@ window.addEventListener('message', (e) => {
 
 ### 5.2 三类权限的授权时机
 
-1. **桥内权限**（蓝牙、文件）：由模块内部在首次调用时申请，页面无需处理，只需处理拒绝回调。
+1. **桥内权限**（蓝牙、文件、location）：由模块内部在首次调用时申请，页面无需处理，只需处理拒绝回调。
 2. **Web API 权限**（录音/摄像头/定位）：页面调用 `getUserMedia` / `geolocation` 时，
    `WebChromeClient.onPermissionRequest` / `onGeolocationPermissionsShowPrompt` 自动转成系统弹窗。
    放行是异步的（先系统弹窗，回调里再 `grant()`）：期间页面切走或重复申请会让请求失效，
