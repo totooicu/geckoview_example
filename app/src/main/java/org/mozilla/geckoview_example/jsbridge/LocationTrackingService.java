@@ -1,6 +1,7 @@
 package org.mozilla.geckoview_example.jsbridge;
 
 import android.Manifest;
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -9,6 +10,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.location.Location;
 import android.location.LocationListener;
@@ -17,7 +19,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.BatteryManager;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -82,6 +86,12 @@ public class LocationTrackingService extends Service {
 
   public static final String ACTION_START = "org.mozilla.geckoview_example.LOCATION_START";
   public static final String ACTION_STOP = "org.mozilla.geckoview_example.LOCATION_STOP";
+  /** 闹钟心跳：取证模式下每 60 秒醒一次，用来分清「进程被冻」和「线程被挂起」。 */
+  public static final String ACTION_WAKE = "org.mozilla.geckoview_example.LOCATION_WAKE";
+
+  /** 闹钟间隔：60 秒。setAndAllowWhileIdle 在 Doze 里也是系统能给你的最密档位。 */
+  private static final long WAKE_ALARM_MS = 60000L;
+  private static final int WAKE_ALARM_REQ = 7701;
 
   private static final String CHANNEL_ID = "location_tracking";
   private static final int NOTIFICATION_ID = 2002;
@@ -136,6 +146,8 @@ public class LocationTrackingService extends Service {
   private static volatile String sLastNote = "";
   /** 诊断字段：磨合后台续记时要能从网页一眼看出"服务到底在干什么"。 */
   private static volatile boolean sWakeLockHeld = false;
+  /** 下一次闹钟到点的 elapsedRealtime；0 = 没排过。醒来时用它算「迟到了多久」。 */
+  private static volatile long sWakeDueEl = 0;
   private static volatile String sProvider = "";
   private static volatile long sLastFixAt = 0;
   private static volatile long sFixes = 0;
@@ -340,6 +352,11 @@ public class LocationTrackingService extends Service {
   private File mJournalFile;
   private android.content.BroadcastReceiver mScreenReceiver;
   private long mJournalWrites = 0;
+  /** 上一行「有效落笔」的三种时刻，用来在空档结束后补一行探针。 */
+  private long mLastJournalWall = 0;
+  private long mLastJournalUp = 0;
+  private long mLastJournalEl = 0;
+  private String mLastJournalKind = "";
   private boolean mPendingFix = false;
   private long mCurrentIntervalMs = 1000;
   private boolean mStopping = false;
@@ -400,6 +417,11 @@ public class LocationTrackingService extends Service {
       stopTracking("page");
       return START_NOT_STICKY;
     }
+    if (intent != null && ACTION_WAKE.equals(intent.getAction())) {
+      // 闹钟这条路径自己收尾：不走下面的 enabled 判断，免得把自己停掉。
+      onWakeAlarm();
+      return sRunning ? START_STICKY : START_NOT_STICKY;
+    }
     // 这里会收到三种启动：页面 enabled=true（ACTION_START）、页面显式 start，
     // 以及系统杀进程后的重建（intent == null）。
     sConfig = LocationConfig.load(this);
@@ -446,6 +468,7 @@ public class LocationTrackingService extends Service {
       startForeground(NOTIFICATION_ID, buildNotification());
     }
     acquireWakeLock();
+    armWakeAlarm();
 
     restoreTailFromFile();
     sRunning = true;
@@ -499,6 +522,7 @@ public class LocationTrackingService extends Service {
     mHandler.removeCallbacks(mFixWatchdog);
     mPendingFix = false;
     releaseWakeLock();
+    cancelWakeAlarm();
     journal("stop", stopExtra(reason));
     Log.i(LOGTAG, "tracking stopped (" + reason + "), points=" + sPoints + " rev=" + sRev);
     stopForeground(STOP_FOREGROUND_REMOVE);
@@ -541,6 +565,156 @@ public class LocationTrackingService extends Service {
       return svc != null && svc.mWakeLock != null && svc.mWakeLock.isHeld();
     } catch (Exception e) {
       return false;
+    }
+  }
+
+  /** 空档探针：三个时钟各走了多久 + 当时的电源/定位状态。 */
+  private JSONObject probeGap(long now) {
+    JSONObject o = new JSONObject();
+    try {
+      long up = SystemClock.uptimeMillis();
+      long el = SystemClock.elapsedRealtime();
+      o.put("gapWall", now - mLastJournalWall);
+      o.put("gapUp", mLastJournalUp > 0 ? up - mLastJournalUp : -1);
+      o.put("gapEl", mLastJournalEl > 0 ? el - mLastJournalEl : -1);
+      o.put("before", mLastJournalKind);
+      o.put("n", sTicks);
+    } catch (Exception ignored) {
+    }
+    JSONObject ps = powerSnapshot();
+    try {
+      java.util.Iterator<String> it = ps.keys();
+      while (it.hasNext()) {
+        String k = it.next();
+        o.put(k, ps.get(k));
+      }
+    } catch (Exception ignored) {
+    }
+    return o;
+  }
+
+  /** 电源/省电/Provider 快照：判「整机深睡」「省电掐 GPS」「亮屏但被冻」全靠它。 */
+  private JSONObject powerSnapshot() {
+    JSONObject o = new JSONObject();
+    try {
+      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+      if (pm != null) {
+        o.put("interactive", pm.isInteractive());
+        o.put("saver", pm.isPowerSaveMode());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+          o.put("idle", pm.isDeviceIdleMode());
+          o.put("light", pm.isDeviceLightIdleMode());
+        }
+        o.put("opt", pm.isIgnoringBatteryOptimizations(getPackageName()));
+      }
+      if (mLocationManager != null) {
+        o.put("gpsOn", mLocationManager.isProviderEnabled(LocationManager.GPS_PROVIDER));
+        o.put("netOn", mLocationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER));
+      }
+      IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+      Intent batt = registerReceiver(null, filter);
+      if (batt != null) {
+        int lvl = batt.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+        int scale = batt.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+        o.put("bat", scale > 0 ? Math.round(lvl * 100f / scale) : -1);
+        o.put("plugged", (batt.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) & 0x0F) != 0);
+      }
+    } catch (Exception e) {
+      Log.w(LOGTAG, "powerSnapshot failed", e);
+    }
+    return o;
+  }
+
+  /** 排一次闹钟心跳（只在服务活着的时候排，别把它变成开机自启）。 */
+  private void armWakeAlarm() {
+    try {
+      AlarmManager am = (AlarmManager) getApplicationContext().getSystemService(Context.ALARM_SERVICE);
+      if (am == null) {
+        return;
+      }
+      Intent i = new Intent(this, LocationTrackingService.class);
+      i.setAction(ACTION_WAKE);
+      PendingIntent pi = PendingIntent.getService(getApplicationContext(), WAKE_ALARM_REQ, i,
+          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+      long due = SystemClock.elapsedRealtime() + WAKE_ALARM_MS;
+      sWakeDueEl = due;
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, due, pi);
+      } else {
+        am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, due, pi);
+      }
+    } catch (Exception e) {
+      Log.w(LOGTAG, "armWakeAlarm failed", e);
+    }
+  }
+
+  private void cancelWakeAlarm() {
+    sWakeDueEl = 0;
+    try {
+      AlarmManager am = (AlarmManager) getApplicationContext().getSystemService(Context.ALARM_SERVICE);
+      Intent i = new Intent(this, LocationTrackingService.class);
+      i.setAction(ACTION_WAKE);
+      PendingIntent pi = PendingIntent.getService(getApplicationContext(), WAKE_ALARM_REQ, i,
+          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_NO_CREATE);
+      if (am != null && pi != null) {
+        am.cancel(pi);
+      }
+    } catch (Exception ignored) {
+    }
+  }
+
+  /**
+   * 闹钟到点了。这一行是整轮判读的关键对照：
+   * late 大 = 连闹钟的投递都被压着 → 进程真被冻住；
+   * late 小而 tick 有空档 = 进程活着，只是线程没被调度；
+   * running=false = 采集在闹钟到点时已经不在跑了（被停或被杀）。
+   */
+  private void onWakeAlarm() {
+    long late = sWakeDueEl > 0 ? SystemClock.elapsedRealtime() - sWakeDueEl : -1;
+    boolean wasRunning = sRunning;
+    if (!wasRunning) {
+      sConfig = LocationConfig.load(this);
+    }
+    JSONObject w = new JSONObject();
+    boolean diag = sConfig != null && sConfig.diag;
+    if (diag) {
+      // 只在取证时落账：平时这条心跳只当兜底，不往账本里灌水
+      try {
+        w.put("late", Math.max(-1, late));
+        w.put("running", wasRunning);
+        w.put("enabled", sConfig != null && sConfig.enabled);
+        JSONObject ps = powerSnapshot();
+        java.util.Iterator<String> it = ps.keys();
+        while (it.hasNext()) {
+          String k = it.next();
+          w.put(k, ps.get(k));
+        }
+      } catch (Exception ignored) {
+      }
+    }
+    if (diag) {
+      journal("wake", w);
+    }
+    if (wasRunning) {
+      armWakeAlarm();
+      return;
+    }
+    // 闹钟是唯一稳定到点的入口：采集要是没了、配置还开着、权限还在，就在这里把它拉回来。
+    // Android 12+ 后台起服务会被拒，拒了就记一行，别让它变成静默失效。
+    if (sConfig != null && sConfig.enabled && hasFineLocation()) {
+      try {
+        startTracking("wake-resume");
+        armWakeAlarm();
+      } catch (Exception e) {
+        JSONObject bad = new JSONObject();
+        try {
+          bad.put("why", "wake-resume-blocked");
+          bad.put("msg", String.valueOf(e.getMessage()));
+        } catch (Exception ignored) {
+        }
+        journal("fail", bad);
+        Log.w(LOGTAG, "wake resume blocked", e);
+      }
     }
   }
 
@@ -850,6 +1024,25 @@ public class LocationTrackingService extends Service {
     if (mJournalFile == null) {
       return;
     }
+    long now = System.currentTimeMillis();
+    // 空档本身不会自己说话：这一段为什么没落笔，要用三个时钟的差值来判。
+    // elapsedRealtime 含深睡，uptimeMillis 不含深睡，墙钟含一切——
+    // 三者一比就知道到底是整机睡了、进程冻了，还是单纯取不到点。
+    if (sConfig != null && sConfig.diag && mLastJournalWall > 0 && now - mLastJournalWall > 5000
+        && !"probe".equals(kind) && !"wake".equals(kind) && !"start".equals(kind)
+        && !"stop".equals(kind) && !"diag".equals(kind)) {
+      JSONObject gap = probeGap(now);
+      mLastJournalWall = now;
+      mLastJournalUp = SystemClock.uptimeMillis();
+      mLastJournalEl = SystemClock.elapsedRealtime();
+      journal("probe", gap);
+    }
+    if (kind.equals("tick") || kind.equals("fix") || kind.equals("fail")
+        || kind.equals("skip") || kind.equals("probe") || kind.equals("wake")) {
+      mLastJournalWall = now;
+      mLastJournalUp = SystemClock.uptimeMillis();
+      mLastJournalEl = SystemClock.elapsedRealtime();
+    }
     try {
       JSONObject line = new JSONObject();
       line.put("t", System.currentTimeMillis());
@@ -860,6 +1053,7 @@ public class LocationTrackingService extends Service {
       line.put("f", sFixes);
       line.put("x", sFailures);
       line.put("pts", sPoints);
+      mLastJournalKind = kind;
       if (sConfig != null) {
         line.put("diag", sConfig.diag);
       }
@@ -1063,6 +1257,7 @@ public class LocationTrackingService extends Service {
       mHandler.removeCallbacks(mFixWatchdog);
     }
     releaseWakeLock();
+    cancelWakeAlarm();
     if (sInstance == this) {
       sInstance = null;
     }

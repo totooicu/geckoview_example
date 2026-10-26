@@ -144,3 +144,28 @@ tick(按策略定时) → requestSingleUpdate(provider)
   必须留在账本里。
 - **跳拍也算一拍**：上一发请求还没回时，这一拍不重复发请求，但写一行 `skip {why:"pending-fix"}`。
   于是网页的 tick 覆盖率量的是「进程活着」，而不是「请求发出去了」，两者不再互相污染。
+
+## 九、0.3.3-tune：三个时钟探针 + 60 秒闹钟心跳（判「谁在睡」）
+
+0.3.2 的实测把问题定性了：**国产 ROM 的「后台行为」限制不放行时，前台服务 + 唤醒锁 + 电池加白
+三件套照样会被冻**（熄屏后 135 秒账本一行不写，回前台立刻恢复）。放行之后同一台机
+tick 覆盖率 98%，每一拍都取得到点。剩下要回答的是「以后再出现空白，是谁睡的」。
+
+- **probe 行（空档解剖）**：任何一拍发现距上一次落笔超过 5 秒，就先补一行
+  `probe`，记这三个时钟各走了多久——`gapWall`（墙钟）、`gapEl`（`elapsedRealtime`，含深睡）、
+  `gapUp`（`uptimeMillis`，**不含**深睡），再加当时的电源快照：`interactive`（亮屏）、
+  `saver`（省电模式）、`idle`/`light`（Doze / 轻度 Doze）、`gpsOn`/`netOn`（两个 provider 的开关）、
+  `bat`/`plugged`（电量、是否充电）、`opt`（电池优化白名单）、`wl`（唤醒锁）。
+  判读：`gapUp ≈ gapWall` → CPU 全程醒着，是**壳的进程被冻**；`gapUp` 少一大截 → **整机真睡了**。
+- **wake 行（闹钟对照）**：`startTracking` 排一个 60 秒的 `setAndAllowWhileIdle`
+  （`ELAPSED_REALTIME_WAKEUP`，`PendingIntent.getService` 指向自己），每次到点重排。
+  它带 `late`（比预定时刻晚了多少）。这一段空档里一次 `wake` 都没有 → 连闹钟投递都被压着，
+  进程是被冻/被杀；`wake` 准点进来而 `tick` 没跟上 → 进程能醒，问题在采集线程。
+  闹钟到点时若 `enabled` 还开着、权限还在而服务没在跑，就地 `startTracking("wake-resume")`
+  ——这是 `START_STICKY` 之外的第二条复活路径（`START_STICKY` 的重建时机由系统定，不保证准点）。
+  只在取证模式下写 `wake` 行，平时这条心跳纯做兜底，不灌水进账本。
+- 停服 / 销毁时 `cancelWakeAlarm()`，不让它变成开机自启。
+
+网页侧（`lab 10-26.8` 起）已经把这两类行接上判读：结论后面直接写
+「CPU 全程醒着（开机时钟也走了 N 秒）→ 手机没睡，是壳的进程被冻住 · 已进入 Doze · GPS 开关被关了」
+这类物证，并把每个大空档的「闹钟 N/M」列出来。
