@@ -1,0 +1,840 @@
+package org.mozilla.geckoview_example.jsbridge;
+
+import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.util.Log;
+
+import androidx.annotation.Nullable;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.mozilla.geckoview_example.WebViewActivity;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Foreground service that keeps recording location while the app is in the
+ * background / screen off. This is the native "fallback" half of the mixed
+ * design: while the page is visible it records via watchPosition itself; once
+ * the page cannot run, this service takes over.
+ *
+ * <p><b>后台续记（feat/location-tune 磨合重点）</b>——让"壳退到后台/熄屏还记"
+ * 真正成立的四件事，缺一件都会断：</p>
+ * <ol>
+ *   <li><b>前台服务 + location 类型</b>：Android 10+ 起，后台访问定位必须有
+ *       foregroundServiceType="location" 的前台服务（清单已声明，Android 14+
+ *       还要 FOREGROUND_SERVICE_LOCATION 权限）。startForeground 必须发生在
+ *       任何取点之前。</li>
+ *   <li><b>PARTIAL_WAKE_LOCK</b>：熄屏后 CPU 会睡，Handler 的 tick 会被推迟到
+ *       下一次亮屏。持一把部分唤醒锁，tick 和 GPS 回调才按点到达（整机 Doze
+ *       期间前台服务 + 唤醒锁是官方允许的持续定位组合）。</li>
+ *   <li><b>脱离页面的生命周期</b>：采集全在本服务里，页面只是配置来源和展示层。
+ *       WebView 退到后台会被冻结（JS 定时器停跳），但本服务与它的任务无关；
+ *       用户从最近任务划掉壳，服务也继续（onTaskRemoved 不自杀）。</li>
+ *   <li><b>重启语义</b>：START_STICKY 让系统在杀进程后重建服务；重建时只在
+ *       配置仍 enabled 的情况下恢复（用户停过的服务不许自己醒来）。配置随
+ *       SharedPreferences 持久化，所以重建不依赖页面。</li>
+ * </ol>
+ *
+ * <p>采点策略与页面一致（locationAuto.ts，见 pushed config）：</p>
+ * <ul>
+ *   <li>fixed - sample every intervalBaseMs.</li>
+ *   <li>backoff - after n consecutive fixes merged into the same point, wait
+ *       intervalBaseMs * 2^n, capped at intervalMaxMs (defaults 1s → 64s). A new
+ *       point resets n to 0, so moving keeps the 1s cadence.</li>
+ * </ul>
+ *
+ * <p>Deduplication mirrors the page's appendPoint(): a new fix is compared only
+ * with the last recorded point (haversine). Within thresholdM it merges (update
+ * ts + accuracy, keep coordinates/note), otherwise it appends a new point. rev
+ * increments only on real append/delete. New points persist immediately;
+ * time-only refreshes persist at most every FLUSH_MS. Data is stored as JSONL in
+ * the app-private files dir, one point per line:
+ * {@code {"ts":...,"lat":...,"lng":...,"accuracy":...,"rev":N}}.</p>
+ */
+public class LocationTrackingService extends Service {
+  private static final String LOGTAG = "LocationTrackingService";
+
+  public static final String ACTION_START = "org.mozilla.geckoview_example.LOCATION_START";
+  public static final String ACTION_STOP = "org.mozilla.geckoview_example.LOCATION_STOP";
+
+  private static final String CHANNEL_ID = "location_tracking";
+  private static final int NOTIFICATION_ID = 2002;
+  private static final String FILE_NAME = "location_log.jsonl";
+
+  /** Persist throttle for time-only refreshes (page FLUSH_MS = 15000). */
+  private static final long FLUSH_MS = 15000;
+
+  /** 通知栏文案刷新节流：每次追加都通知会刷屏，够用就行。 */
+  private static final long NOTIFY_THROTTLE_MS = 5000;
+
+  /** 部分唤醒锁：熄屏后让 tick 与 GPS 回调照常到达。 */
+  private static final String WAKE_LOCK_TAG = "dr:location-tracking";
+
+  /** Location fix watchdog: if no fix arrives within interval+slack, retry. */
+  private static final long FIX_WATCHDOG_SLACK_MS = 800;
+
+  /** Exponent clamp for the backoff (2^16 * 1s already far beyond any cap). */
+  private static final int MAX_BACKOFF_N = 16;
+
+  /** Bridge-facing listener (set by LocationBridge) for events. */
+  public interface Listener {
+    void onPoint(JSONObject point);
+
+    /** 服务起/停时推一次（页面据此即时更新状态，不用等下一次轮询）。 */
+    default void onState(JSONObject state) {}
+  }
+
+  @Nullable private static Listener sListener;
+  @Nullable private static volatile LocationTrackingService sInstance;
+
+  /** Current config snapshot (refreshed on start and on applyConfig). */
+  private static volatile LocationConfig sConfig = new LocationConfig();
+
+  private static volatile boolean sRunning = false;
+  private static volatile long sStartedAt = 0;
+  private static volatile int sPoints = 0;
+  private static volatile int sRev = 0;
+  private static volatile double sLastLat = 0;
+  private static volatile double sLastLng = 0;
+  private static volatile long sLastTs = 0;
+  private static volatile double sLastAccuracy = 0;
+  private static volatile String sLastNote = "";
+  /** 诊断字段：磨合后台续记时要能从网页一眼看出"服务到底在干什么"。 */
+  private static volatile boolean sWakeLockHeld = false;
+  private static volatile String sProvider = "";
+  private static volatile long sLastFixAt = 0;
+  private static volatile long sFixes = 0;
+  private static volatile long sFailures = 0;
+  private static volatile String sLastError = "";
+  private static volatile long sIntervalCurrentMs = 0;
+  private static volatile long sLastNotifyAt = 0;
+
+  public static boolean isRunning() {
+    return sRunning;
+  }
+
+  public static void setListener(@Nullable Listener listener) {
+    sListener = listener;
+  }
+
+  /** Snapshot for location.status. */
+  public static JSONObject statusJson() {
+    try {
+      JSONObject o = new JSONObject();
+      o.put("tracking", sRunning);
+      o.put("startedAt", sStartedAt);
+      o.put("points", sPoints);
+      o.put("rev", sRev);
+      JSONObject last = new JSONObject();
+      last.put("ts", sLastTs);
+      last.put("lat", sLastLat);
+      last.put("lng", sLastLng);
+      last.put("accuracy", sLastAccuracy);
+      last.put("note", sLastNote);
+      o.put("lastPoint", last);
+      // 后台续记诊断：网页的「原生心跳」用的就是这几个字段
+      o.put("wakeLock", sWakeLockHeld);
+      o.put("provider", sProvider);
+      o.put("lastFixAt", sLastFixAt);
+      o.put("fixes", sFixes);
+      o.put("failures", sFailures);
+      o.put("lastError", sLastError);
+      o.put("intervalCurrentMs", sIntervalCurrentMs);
+      return o;
+    } catch (Exception e) {
+      return new JSONObject();
+    }
+  }
+
+  /** 通知一次服务状态变化（起/停）。 */
+  private static void emitState(String reason) {
+    Listener l = sListener;
+    if (l == null) {
+      return;
+    }
+    try {
+      JSONObject o = statusJson();
+      o.put("reason", reason);
+      l.onState(o);
+    } catch (Exception e) {
+      Log.w(LOGTAG, "emitState failed", e);
+    }
+  }
+
+  /** All recorded points for location.getHistory. */
+  public static JSONObject historyJson() {
+    JSONObject o = new JSONObject();
+    try {
+      LocationTrackingService svc = sInstance;
+      JSONArray points = svc != null ? svc.readAllPoints() : new JSONArray();
+      o.put("points", points);
+      o.put("rev", sRev);
+    } catch (Exception e) {
+      Log.e(LOGTAG, "historyJson failed", e);
+      try {
+        o.put("points", new JSONArray());
+        o.put("rev", sRev);
+      } catch (Exception ignored) {
+      }
+    }
+    return o;
+  }
+
+  /** Clear all recorded points (location.clearHistory). */
+  public static void clearHistory() {
+    LocationTrackingService svc = sInstance;
+    if (svc != null) {
+      svc.clearFile();
+    }
+    sRev = 0;
+    sPoints = 0;
+    sLastTs = 0;
+    sLastLat = 0;
+    sLastLng = 0;
+    sLastAccuracy = 0;
+    sLastNote = "";
+  }
+
+  /** Push a new config while running (interval changes apply on next tick). */
+  public static void applyConfig(Context ctx) {
+    sConfig = LocationConfig.load(ctx);
+    LocationTrackingService svc = sInstance;
+    if (svc != null) {
+      svc.reschedule();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Instance state
+  // ---------------------------------------------------------------------------
+
+  private final Handler mHandler = new Handler(Looper.getMainLooper());
+
+  /** Consecutive fixes merged into the same point; backoff exponent n. */
+  private int mSameCount = 0;
+
+  private LocationManager mLocationManager;
+  private String mProvider;
+
+  /** 部分唤醒锁（只在本服务记录期间持有）。 */
+  @Nullable private PowerManager.WakeLock mWakeLock;
+
+  /** Last appended point (dedupe baseline), mirrors page rows[last]. */
+  @Nullable private JSONObject mLastPoint;
+  private long mLastPersistTs = 0;
+  private File mLogFile;
+  private boolean mPendingFix = false;
+  private long mCurrentIntervalMs = 1000;
+  private boolean mStopping = false;
+
+  private final Runnable mTick = this::onTick;
+  private final Runnable mFixWatchdog = this::onFixWatchdog;
+
+  private final LocationListener mFixListener =
+      new LocationListener() {
+        @Override
+        public void onLocationChanged(Location location) {
+          onFix(location);
+        }
+
+        @Override
+        public void onStatusChanged(String provider, int status, Bundle extras) {
+          // ignore
+        }
+
+        @Override
+        public void onProviderEnabled(String provider) {
+          // ignore
+        }
+
+        @Override
+        public void onProviderDisabled(String provider) {
+          // ignore
+        }
+      };
+
+  @Override
+  public void onCreate() {
+    super.onCreate();
+    mLocationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+    mProvider = pickProvider();
+    mLogFile = new File(getFilesDir(), FILE_NAME);
+    createNotificationChannel();
+    sInstance = this;
+  }
+
+  @Override
+  public int onStartCommand(Intent intent, int flags, int startId) {
+    if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+      stopTracking("page");
+      return START_NOT_STICKY;
+    }
+    // 这里会收到三种启动：页面 enabled=true（ACTION_START）、页面显式 start，
+    // 以及系统杀进程后的重建（intent == null）。
+    sConfig = LocationConfig.load(this);
+    boolean explicitStart = intent != null && ACTION_START.equals(intent.getAction());
+    if (!explicitStart && !sConfig.enabled) {
+      // 系统重建但用户早就关掉了：不许自己醒来（否则停了还在后台耗电）。
+      Log.i(LOGTAG, "restart ignored: config.enabled=false");
+      stopSelf();
+      return START_NOT_STICKY;
+    }
+    if (!hasFineLocation()) {
+      Log.w(LOGTAG, "no fine location permission, refusing to start");
+      stopSelf();
+      return START_NOT_STICKY;
+    }
+    startTracking(intent == null ? "system-restart" : "page");
+    return START_STICKY;
+  }
+
+  /**
+   * 用户从最近任务划掉壳：Activity/WebView 没了，但采集属于「用户已经打开过的
+   * 自动打点」，服务不该跟着任务一起死——这是后台续记最容易断的一环。
+   */
+  @Override
+  public void onTaskRemoved(Intent rootIntent) {
+    Log.i(LOGTAG, "onTaskRemoved: keep tracking (running=" + sRunning + ")");
+    super.onTaskRemoved(rootIntent);
+  }
+
+  private void startTracking(String reason) {
+    if (sRunning) {
+      return;
+    }
+    mStopping = false;
+    // Android 14+ rule: the location foreground service must be started with the
+    // location type BEFORE any location work, exactly like the mediaProjection rule.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      startForeground(
+          NOTIFICATION_ID,
+          buildNotification(),
+          ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+    } else {
+      startForeground(NOTIFICATION_ID, buildNotification());
+    }
+    acquireWakeLock();
+
+    restoreTailFromFile();
+    sRunning = true;
+    sStartedAt = System.currentTimeMillis();
+    sLastError = "";
+
+    mSameCount = 0;
+    mCurrentIntervalMs = sConfig.intervalBaseMs;
+    sIntervalCurrentMs = mCurrentIntervalMs;
+    mProvider = pickProvider();
+    sProvider = mProvider;
+    mHandler.removeCallbacks(mTick);
+    mHandler.postDelayed(mTick, 0);
+    Log.i(LOGTAG, "tracking started (" + reason + "), provider=" + mProvider
+        + " strategy=" + sConfig.strategy + " interval=" + mCurrentIntervalMs + "ms");
+    updateNotification(true);
+    emitState(reason);
+  }
+
+  private void stopTracking(String reason) {
+    if (mStopping) {
+      return;
+    }
+    mStopping = true;
+    sRunning = false;
+    mHandler.removeCallbacks(mTick);
+    mHandler.removeCallbacks(mFixWatchdog);
+    mPendingFix = false;
+    releaseWakeLock();
+    Log.i(LOGTAG, "tracking stopped (" + reason + "), points=" + sPoints + " rev=" + sRev);
+    stopForeground(STOP_FOREGROUND_REMOVE);
+    stopSelf();
+    emitState("stop:" + reason);
+  }
+
+  /* ---------------------------------------------------------------------------
+   * 唤醒锁：熄屏后让 tick / GPS 回调按点到达
+   * ------------------------------------------------------------------------ */
+
+  private void acquireWakeLock() {
+    if (mWakeLock != null) {
+      return;
+    }
+    try {
+      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+      if (pm == null) {
+        return;
+      }
+      mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG);
+      mWakeLock.setReferenceCounted(false);
+      mWakeLock.acquire();
+      sWakeLockHeld = true;
+      Log.i(LOGTAG, "wake lock acquired");
+    } catch (Exception e) {
+      sLastError = "wake lock: " + e.getMessage();
+      Log.w(LOGTAG, "wake lock acquire failed", e);
+    }
+  }
+
+  private void releaseWakeLock() {
+    try {
+      if (mWakeLock != null && mWakeLock.isHeld()) {
+        mWakeLock.release();
+      }
+    } catch (Exception ignored) {
+    }
+    mWakeLock = null;
+    sWakeLockHeld = false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Collection loop
+  // ---------------------------------------------------------------------------
+
+  private void onTick() {
+    if (!sRunning || mStopping || mPendingFix) {
+      scheduleNext(mCurrentIntervalMs);
+      return;
+    }
+    mPendingFix = true;
+    try {
+      mLocationManager.requestSingleUpdate(mProvider, mFixListener, Looper.getMainLooper());
+    } catch (SecurityException | IllegalArgumentException e) {
+      Log.e(LOGTAG, "requestSingleUpdate failed", e);
+      sFailures++;
+      sLastError = "requestSingleUpdate: " + e.getMessage();
+      mPendingFix = false;
+      // 提供者被关掉时换一个再试（GPS → 网络）
+      mProvider = pickProvider();
+      sProvider = mProvider;
+      scheduleNext(5000);
+      return;
+    }
+    // Watchdog: if no fix arrives in time, drop the pending flag and move on.
+    mHandler.removeCallbacks(mFixWatchdog);
+    mHandler.postDelayed(mFixWatchdog, mCurrentIntervalMs + FIX_WATCHDOG_SLACK_MS);
+  }
+
+  private void onFixWatchdog() {
+    if (mPendingFix) {
+      mPendingFix = false;
+      sFailures++;
+      sLastError = "取点超时（" + mCurrentIntervalMs + "ms 内没有回调）";
+      Log.w(LOGTAG, "fix watchdog fired, provider=" + mProvider);
+      mProvider = pickProvider();
+      sProvider = mProvider;
+      scheduleNext(nextInterval());
+    }
+  }
+
+  private void onFix(Location location) {
+    mPendingFix = false;
+    mHandler.removeCallbacks(mFixWatchdog);
+    if (!sRunning || mStopping) {
+      return;
+    }
+    long now = System.currentTimeMillis();
+    double lat = location.getLatitude();
+    double lng = location.getLongitude();
+    long ts = location.getTime();
+    float accuracy = location.getAccuracy();
+    sFixes++;
+    sLastFixAt = now;
+    sLastError = "";
+
+    JSONObject point = new JSONObject();
+    try {
+      point.put("ts", ts);
+      point.put("lat", lat);
+      point.put("lng", lng);
+      point.put("accuracy", accuracy);
+    } catch (Exception e) {
+      Log.e(LOGTAG, "point build failed", e);
+      scheduleNext(nextInterval());
+      return;
+    }
+
+    // 新点：同点连击归零；合并：n+1，下一次等待翻倍
+    boolean added = appendPoint(point);
+    mSameCount = added ? 0 : mSameCount + 1;
+
+    if (sListener != null) {
+      try {
+        sListener.onPoint(point);
+      } catch (Exception e) {
+        Log.w(LOGTAG, "listener onPoint failed", e);
+      }
+    }
+    updateNotification(false);
+    scheduleNext(nextInterval());
+  }
+
+  /**
+   * Next interval by the page's continuous-sampling strategy (locationAuto.ts
+   * nextSampleMs): fixed = base; backoff = base * 2^n capped at max.
+   */
+  private long nextInterval() {
+    if (LocationConfig.STRATEGY_FIXED.equals(sConfig.strategy)) {
+      return sConfig.intervalBaseMs;
+    }
+    int n = Math.min(Math.max(0, mSameCount), MAX_BACKOFF_N);
+    long ms = sConfig.intervalBaseMs;
+    for (int i = 0; i < n && ms < sConfig.intervalMaxMs; i++) {
+      ms *= 2;
+    }
+    return Math.min(ms, sConfig.intervalMaxMs);
+  }
+
+  private void scheduleNext(long intervalMs) {
+    mCurrentIntervalMs = intervalMs;
+    sIntervalCurrentMs = intervalMs;
+    if (!sRunning || mStopping) {
+      return;
+    }
+    mHandler.removeCallbacks(mTick);
+    mHandler.postDelayed(mTick, intervalMs);
+  }
+
+  /** Apply a config change while running (just reschedule the next tick). */
+  private void reschedule() {
+    if (sRunning) {
+      mHandler.removeCallbacks(mTick);
+      mHandler.postDelayed(mTick, 0);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // appendPoint() — native replica of the page's locationAuto.ts
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Compare only with the last recorded point (haversine). Inside the threshold:
+   * merge (refresh ts + accuracy, keep coordinates/note), do not add, rev stays.
+   * Outside (or threshold 0): append a new point, rev++, persist immediately.
+   *
+   * @return true if a new point was appended, false if merged into the last one
+   */
+  private boolean appendPoint(JSONObject point) {
+    if (mLastPoint == null) {
+      addPoint(point);
+      return true;
+    }
+    try {
+      double distM =
+          haversineMeters(
+              mLastPoint.getDouble("lat"),
+              mLastPoint.getDouble("lng"),
+              point.getDouble("lat"),
+              point.getDouble("lng"));
+      double threshold = sConfig.thresholdM;
+      if (threshold > 0 && distM < threshold) {
+        // Merged: refresh ts + accuracy only; coordinates/note keep the first value.
+        mLastPoint.put("ts", point.getLong("ts"));
+        mLastPoint.put("accuracy", point.getDouble("accuracy"));
+        updateLastPointStatics(mLastPoint);
+        maybePersistTimeRefresh();
+        return false;
+      }
+      addPoint(point);
+      return true;
+    } catch (Exception e) {
+      Log.e(LOGTAG, "appendPoint failed", e);
+      return false;
+    }
+  }
+
+  private void addPoint(JSONObject point) {
+    sRev++;
+    try {
+      point.put("rev", sRev);
+    } catch (Exception e) {
+      // ignore
+    }
+    mLastPoint = point;
+    sPoints++;
+    updateLastPointStatics(point);
+    persistLine(point, false);
+  }
+
+  private void updateLastPointStatics(JSONObject point) {
+    try {
+      sLastTs = point.getLong("ts");
+      sLastLat = point.getDouble("lat");
+      sLastLng = point.getDouble("lng");
+      sLastAccuracy = point.getDouble("accuracy");
+      sLastNote = point.optString("note", "");
+    } catch (Exception ignored) {
+    }
+  }
+
+  /** Time-only refreshes persist at most once every FLUSH_MS. */
+  private void maybePersistTimeRefresh() {
+    long now = System.currentTimeMillis();
+    if (now - mLastPersistTs >= FLUSH_MS) {
+      if (mLastPoint != null) {
+        persistLine(mLastPoint, true);
+      }
+      mLastPersistTs = now;
+    }
+  }
+
+  /**
+   * Append a new point line (fast path), or rewrite the last line for a merged
+   * (time-refresh) update so read-back semantics stay identical to the page's rows.
+   */
+  private synchronized void persistLine(JSONObject point, boolean replaceLast) {
+    try {
+      if (!replaceLast) {
+        try (FileOutputStream fos = new FileOutputStream(mLogFile, true);
+            OutputStreamWriter writer =
+                new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
+          writer.write(point.toString());
+          writer.write("\n");
+          writer.flush();
+        }
+        return;
+      }
+      List<String> lines = readLines();
+      if (!lines.isEmpty()) {
+        lines.remove(lines.size() - 1);
+      }
+      lines.add(point.toString());
+      try (FileOutputStream fos = new FileOutputStream(mLogFile, false);
+          OutputStreamWriter writer =
+              new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
+        for (String line : lines) {
+          writer.write(line);
+          writer.write("\n");
+        }
+        writer.flush();
+      }
+    } catch (Exception e) {
+      Log.e(LOGTAG, "persistLine failed", e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // File helpers
+  // ---------------------------------------------------------------------------
+
+  private List<String> readLines() {
+    List<String> lines = new ArrayList<>();
+    if (mLogFile == null || !mLogFile.exists()) {
+      return lines;
+    }
+    try (BufferedReader reader =
+        new BufferedReader(
+            new InputStreamReader(new FileInputStream(mLogFile), StandardCharsets.UTF_8))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (!line.isEmpty()) {
+          lines.add(line);
+        }
+      }
+    } catch (Exception e) {
+      Log.e(LOGTAG, "readLines failed", e);
+    }
+    return lines;
+  }
+
+  private JSONArray readAllPoints() {
+    JSONArray arr = new JSONArray();
+    for (String line : readLines()) {
+      try {
+        arr.put(new JSONObject(line));
+      } catch (Exception ignored) {
+      }
+    }
+    return arr;
+  }
+
+  /** Restore last point / rev / count from the persisted file on (re)start. */
+  private void restoreTailFromFile() {
+    List<String> lines = readLines();
+    if (lines.isEmpty()) {
+      sPoints = 0;
+      sRev = 0;
+      mLastPoint = null;
+      return;
+    }
+    sPoints = lines.size();
+    String tail = lines.get(lines.size() - 1);
+    try {
+      mLastPoint = new JSONObject(tail);
+      sRev = mLastPoint.optInt("rev", 0);
+      updateLastPointStatics(mLastPoint);
+    } catch (Exception e) {
+      Log.w(LOGTAG, "restoreTail failed", e);
+      mLastPoint = null;
+      sRev = 0;
+      sPoints = 0;
+    }
+  }
+
+  private void clearFile() {
+    synchronized (this) {
+      if (mLogFile != null && mLogFile.exists()) {
+        //noinspection ResultOfMethodCallIgnored
+        mLogFile.delete();
+      }
+      mLastPoint = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Misc
+  // ---------------------------------------------------------------------------
+
+  private boolean hasFineLocation() {
+    return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+        == PackageManager.PERMISSION_GRANTED;
+  }
+
+  private String pickProvider() {
+    if (mLocationManager == null) {
+      return LocationManager.GPS_PROVIDER;
+    }
+    try {
+      if (mLocationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+        return LocationManager.GPS_PROVIDER;
+      }
+      if (mLocationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+        return LocationManager.NETWORK_PROVIDER;
+      }
+    } catch (Exception ignored) {
+    }
+    return LocationManager.GPS_PROVIDER;
+  }
+
+  /** Standard haversine great-circle distance in meters. */
+  public static double haversineMeters(double lat1, double lng1, double lat2, double lng2) {
+    double R = 6371000.0;
+    double dLat = Math.toRadians(lat2 - lat1);
+    double dLng = Math.toRadians(lng2 - lng1);
+    double a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2)
+            + Math.cos(Math.toRadians(lat1))
+                * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLng / 2)
+                * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.min(1.0, Math.sqrt(a)));
+  }
+
+  @Override
+  public void onDestroy() {
+    if (sRunning) {
+      sRunning = false;
+      mHandler.removeCallbacks(mTick);
+      mHandler.removeCallbacks(mFixWatchdog);
+    }
+    releaseWakeLock();
+    if (sInstance == this) {
+      sInstance = null;
+    }
+    super.onDestroy();
+  }
+
+  @Nullable
+  @Override
+  public IBinder onBind(Intent intent) {
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notification
+  // ---------------------------------------------------------------------------
+
+  private void createNotificationChannel() {
+    NotificationManager nm = getSystemService(NotificationManager.class);
+    NotificationChannel channel =
+        new NotificationChannel(CHANNEL_ID, "位置记录", NotificationManager.IMPORTANCE_LOW);
+    channel.setDescription("自动打点在后台记录位置时的常驻通知");
+    nm.createNotificationChannel(channel);
+  }
+
+  /**
+   * 常驻通知：既是前台服务的"门票"，也是后台续记的活体证据——熄屏后瞄一眼
+   * 通知栏就知道刚才有没有在记（点数、最近一次定位、当前间隔）。
+   */
+  private Notification buildNotification() {
+    Intent stopIntent = new Intent(this, LocationTrackingService.class).setAction(ACTION_STOP);
+    PendingIntent stopPi =
+        PendingIntent.getService(
+            this, 1, stopIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    Intent openIntent = new Intent(this, WebViewActivity.class);
+    openIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
+    PendingIntent openPi =
+        PendingIntent.getActivity(
+            this, 2, openIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+    StringBuilder text = new StringBuilder();
+    text.append("已记 ").append(sPoints).append(" 个点");
+    if (sLastFixAt > 0) {
+      text.append(" · 最近 ").append(clock(sLastFixAt));
+      if (sLastAccuracy > 0) {
+        text.append(" ±").append(Math.round(sLastAccuracy)).append("m");
+      }
+    } else if (sFailures > 0) {
+      text.append(" · 还没取到点（失败 ").append(sFailures).append(" 次）");
+    } else {
+      text.append(" · 等待第一个定位点…");
+    }
+    if (sIntervalCurrentMs > 0) {
+      text.append(" · 间隔 ").append(sIntervalCurrentMs / 1000).append("s");
+    }
+    return new Notification.Builder(this, CHANNEL_ID)
+        .setContentTitle("正在记录位置")
+        .setContentText(text.toString())
+        .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+        .setContentIntent(openPi)
+        .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPi)
+        .setOngoing(true)
+        .setOnlyAlertOnce(true)
+        .setShowWhen(false)
+        .build();
+  }
+
+  /** 刷新通知文案（节流；force=true 用于起停这种关键时刻）。 */
+  private void updateNotification(boolean force) {
+    long now = System.currentTimeMillis();
+    if (!force && now - sLastNotifyAt < NOTIFY_THROTTLE_MS) {
+      return;
+    }
+    sLastNotifyAt = now;
+    try {
+      NotificationManager nm = getSystemService(NotificationManager.class);
+      nm.notify(NOTIFICATION_ID, buildNotification());
+    } catch (Exception e) {
+      Log.w(LOGTAG, "notify failed", e);
+    }
+  }
+
+  /** 通知里的 HH:mm:ss（后台诊断只看得懂这个粒度）。 */
+  private static String clock(long ms) {
+    java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.CHINA);
+    return f.format(new java.util.Date(ms));
+  }
+}

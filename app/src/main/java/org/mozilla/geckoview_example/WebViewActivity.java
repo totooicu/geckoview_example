@@ -56,8 +56,15 @@ import java.util.Map;
 public class WebViewActivity extends AppCompatActivity {
   private static final String LOGTAG = "WebViewActivity";
 
+  /**
+   * 本分支（feat/location-tune · 定位磨合）固定加载的测试页：网页端的
+   * 「定位磨合台」。它把网页端定位功能精简搬了一份，专门用来磨后台续记。
+   * 页面暂不并进网页仓库 main，因此手工放在 gh-pages 的 assets/ 下——每次
+   * 部署都会保留 assets/，地址长期稳定；磨合结束、页面并进 main 后，
+   * 这里再改回根路径 /DatingRecord/location-lab/。
+   */
   public static final String DEFAULT_URL =
-      "https://totooicu.github.io/DatingRecord/";
+      "https://totooicu.github.io/DatingRecord/assets/location-lab/";
 
   /** Only this host may be loaded; any other link is blocked (no external nav). */
   public static final String ALLOWED_HOST = "totooicu.github.io";
@@ -154,6 +161,7 @@ public class WebViewActivity extends AppCompatActivity {
           public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
             injectAdapter(view);
+            pullLocationConfig(view);
             mPageReady = true;
           }
 
@@ -292,6 +300,66 @@ public class WebViewActivity extends AppCompatActivity {
   /** Inject the adapter script; safe to call repeatedly. */
   private void injectAdapter(WebView view) {
     view.evaluateJavascript(ADAPTER_JS, null);
+  }
+
+  /**
+   * 页面加载完就把它的自动打点配置（localStorage['dr.autoLocation']）拉过来：
+   * 这样即使页面一次桥都没调，原生也拿着最新配置；服务被系统重建时按它恢复。
+   * 注意 evaluateJavascript 回传的是「结果值的 JSON 序列化」：JS 若返回字符串，
+   * 拿到的会是一层带引号的字符串字面量，JSONObject 解析必失败。所以 JS 直接返回
+   * 对象（缺失值给空串），Java 侧拿到的就是对象 JSON。
+   */
+  private void pullLocationConfig(WebView view) {
+    view.evaluateJavascript(
+        "(function(){try{var v=localStorage.getItem('dr.autoLocation');"
+            + "return {ok:true,v:v==null?'':String(v)};}"
+            + "catch(e){return {ok:false};}})()",
+        value -> {
+          if (value == null || value.isEmpty() || "null".equals(value)) {
+            return;
+          }
+          try {
+            org.json.JSONObject wrapper = new org.json.JSONObject(value);
+            if (!wrapper.optBoolean("ok", false)) {
+              return;
+            }
+            String v = wrapper.optString("v", "");
+            if (v.isEmpty()) {
+              return;
+            }
+            org.mozilla.geckoview_example.jsbridge.LocationConfig cfg =
+                org.mozilla.geckoview_example.jsbridge.LocationConfig.fromJson(v);
+            if (mJsBridge == null || mJsBridge.location() == null) {
+              return;
+            }
+            mJsBridge
+                .location()
+                .handle(
+                    "config-pull",
+                    "location.setConfig",
+                    new org.json.JSONObject(cfgToJson(cfg)),
+                    mJsBridge);
+            Log.i(LOGTAG, "pulled dr.autoLocation: enabled=" + cfg.enabled);
+          } catch (Exception e) {
+            Log.w(LOGTAG, "pullLocationConfig failed: " + e.getMessage());
+          }
+        });
+  }
+
+  /** 把配置序列化回 setConfig 的参数（和 LocationConfig.fromJson 对齐）。 */
+  private String cfgToJson(org.mozilla.geckoview_example.jsbridge.LocationConfig cfg) {
+    try {
+      org.json.JSONObject o = new org.json.JSONObject();
+      o.put("enabled", cfg.enabled);
+      o.put("thresholdM", cfg.thresholdM);
+      o.put("moveThresholdM", cfg.moveThresholdM);
+      o.put("strategy", cfg.strategy);
+      o.put("intervalBaseMs", cfg.intervalBaseMs);
+      o.put("intervalMaxMs", cfg.intervalMaxMs);
+      return o.toString();
+    } catch (Exception e) {
+      return "{}";
+    }
   }
 
   /* ----------------------------------------------------------------------------

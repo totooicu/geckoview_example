@@ -19,6 +19,15 @@
         android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <!-- 后台续记：前台服务 + location 类型（Android 10+ 后台取点的前提），
+         Android 14+ 还要求单独的 FOREGROUND_SERVICE_LOCATION 权限。
+         后台定位权限只在用户主动点「请求后台定位」时才引导去系统设置里授予。 -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <!-- 熄屏后让采集循环继续跑（LocationTrackingService 持有 PARTIAL_WAKE_LOCK） -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- 「忽略电池优化」直连弹窗；国产 ROM 的启动管理仍需用户手动放行 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- WebView 里 getUserMedia 录音：部分定制 ROM 缺这条会 AudioRecord 起不来
          （表现为 NotReadableError · Could not start audio source）。普通权限，不弹框 -->
@@ -69,6 +78,12 @@
             android:name=".jsbridge.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- 连续定位：前台服务 + location 类型，退到后台/熄屏继续记（feat/location-tune） -->
+        <service
+            android:name=".jsbridge.LocationTrackingService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
     </application>
 
 </manifest>

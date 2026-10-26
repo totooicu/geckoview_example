@@ -45,6 +45,7 @@ public class JsBridge {
   /** Permission request codes. */
   public static final int PERM_BLE = 1001;
   public static final int PERM_FILE = 1002;
+  public static final int PERM_LOCATION = 1003;
 
   private final WeakReference<Activity> mActivity;
   private final Handler mMainHandler = new Handler(Looper.getMainLooper());
@@ -55,12 +56,14 @@ public class JsBridge {
   private BleManager mBle;
   private FileBridge mFiles;
   private ScreenCaptureManager mScreen;
+  private LocationBridge mLocation;
 
   public JsBridge(Activity activity) {
     mActivity = new WeakReference<>(activity);
     mBle = new BleManager(activity, this);
     mFiles = new FileBridge(activity, this);
     mScreen = new ScreenCaptureManager(activity, this);
+    mLocation = new LocationBridge(activity, this);
   }
 
   /** Called by the hosting activity once the WebView exists. */
@@ -147,6 +150,8 @@ public class JsBridge {
       mFiles.handle(id, action, params, this);
     } else if (action.startsWith("screen.")) {
       mScreen.handle(id, action, params, this);
+    } else if (action.startsWith("location.")) {
+      mLocation.handle(id, action, params, this);
     } else if (action.startsWith("ui.")) {
       handleUi(id, action, params);
     } else {
@@ -355,5 +360,10 @@ public class JsBridge {
     if (mScreen != null) {
       mScreen.onActivityResult(requestCode, resultCode, data);
     }
+  }
+
+  /** Accessor used by the hosting activity (page-load config pull). */
+  public LocationBridge location() {
+    return mLocation;
   }
 }
