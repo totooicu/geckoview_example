@@ -123,3 +123,24 @@ tick(按策略定时) → requestSingleUpdate(provider)
   **tick 之间出现大空档** → 那段时间被冻结（对齐 `screen` 行看是不是熄屏引起）；
   **tick 连续但没有 fix 行** → 醒着但拿不到定位（多为没给「始终允许」或 provider 被省电掐掉）。
 - 老页面不带 `diag` 字段时，`location.setConfig` 会保留现有取证开关，不会被静默关掉。
+
+## 八、0.3.2-tune：停因留痕、唤醒锁真值、跳拍也记账
+
+上一轮实测出现「后台 113 秒账本一片空白，回前台立刻有拍」，而且状态行报
+「未记录 / 无唤醒锁」。这说明空白段不一定等于「被冻结」——也可能**采集根本是停着的**。
+这一版把这两种情况分开：
+
+- **停机也要留原因**：`start` / `stop` 行现在带 `why`（`page`=页面推的配置或显式停、
+  `system-restart`=系统重建后恢复、`config`=配置变化）、`enabled`、`diag`。网页看到
+  「大空档前面正好有一行 stop」就报「不是睡，是被停」，不再误判成休眠。
+- **取证开着不许停**：`location.setConfig` 里如果 `enabled=false` 但 `diag=true`，
+  壳会把 `enabled` 强留为 `true` 并回 `keptForDiag`。原因：磨合台页面自己的「自动打点」
+  开关是 localStorage 里的，页面一重载就把 `enabled=false` 推下来，把正在取证的采集停了，
+  账本随之断流——这正是上一轮那片空白的最可能来源。
+- **唤醒锁问真值**：`location.status.wakeLock` 和账本每行的 `wl` 不再吃缓存标记，
+  直接 `WakeLock.isHeld()`。`acquireWakeLock()` 也允许在锁被系统收走后重新拿一把。
+- **锁丢了当场记账并补拿**：取证模式下每拍检查一次，锁不在手上就写一行
+  `fail {why:"wakelock-lost"}` 再重新 acquire。没锁 = 熄屏后 CPU 一定睡，这是壳的锅，
+  必须留在账本里。
+- **跳拍也算一拍**：上一发请求还没回时，这一拍不重复发请求，但写一行 `skip {why:"pending-fix"}`。
+  于是网页的 tick 覆盖率量的是「进程活着」，而不是「请求发出去了」，两者不再互相污染。

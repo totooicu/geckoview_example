@@ -170,7 +170,7 @@ public class LocationTrackingService extends Service {
       last.put("note", sLastNote);
       o.put("lastPoint", last);
       // 后台续记诊断：网页的「原生心跳」用的就是这几个字段
-      o.put("wakeLock", sWakeLockHeld);
+      o.put("wakeLock", wakeLockHeld());
       o.put("provider", sProvider);
       o.put("lastFixAt", sLastFixAt);
       o.put("fixes", sFixes);
@@ -462,11 +462,31 @@ public class LocationTrackingService extends Service {
     }
     mHandler.removeCallbacks(mTick);
     mHandler.postDelayed(mTick, 0);
-    journal("start", null);
+    JSONObject st = new JSONObject();
+    try {
+      st.put("why", reason);
+      st.put("enabled", sConfig.enabled);
+      st.put("diag", sConfig.diag);
+      st.put("wl", wakeLockHeld());
+    } catch (Exception ignored) {
+    }
+    journal("start", st);
     Log.i(LOGTAG, "tracking started (" + reason + "), provider=" + mProvider
         + " strategy=" + sConfig.strategy + " interval=" + mCurrentIntervalMs + "ms");
     updateNotification(true);
     emitState(reason);
+  }
+
+  /** 停也要留原因：判读时「被谁停的」比「有没有睡」更要紧。 */
+  private static JSONObject stopExtra(String reason) {
+    JSONObject o = new JSONObject();
+    try {
+      o.put("why", reason);
+      o.put("enabled", sConfig != null && sConfig.enabled);
+      o.put("diag", sConfig != null && sConfig.diag);
+    } catch (Exception ignored) {
+    }
+    return o;
   }
 
   private void stopTracking(String reason) {
@@ -479,7 +499,7 @@ public class LocationTrackingService extends Service {
     mHandler.removeCallbacks(mFixWatchdog);
     mPendingFix = false;
     releaseWakeLock();
-    journal("stop", null);
+    journal("stop", stopExtra(reason));
     Log.i(LOGTAG, "tracking stopped (" + reason + "), points=" + sPoints + " rev=" + sRev);
     stopForeground(STOP_FOREGROUND_REMOVE);
     stopSelf();
@@ -491,22 +511,36 @@ public class LocationTrackingService extends Service {
    * ------------------------------------------------------------------------ */
 
   private void acquireWakeLock() {
-    if (mWakeLock != null) {
+    if (mWakeLock != null && mWakeLock.isHeld()) {
       return;
     }
     try {
       PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
       if (pm == null) {
+        sLastError = "wake lock: no PowerManager";
         return;
       }
-      mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG);
-      mWakeLock.setReferenceCounted(false);
-      mWakeLock.acquire();
-      sWakeLockHeld = true;
-      Log.i(LOGTAG, "wake lock acquired");
+      PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG);
+      wl.setReferenceCounted(false);
+      wl.acquire();
+      mWakeLock = wl;
+      sWakeLockHeld = wl.isHeld();
+      Log.i(LOGTAG, "wake lock acquired, held=" + sWakeLockHeld);
     } catch (Exception e) {
+      mWakeLock = null;
+      sWakeLockHeld = false;
       sLastError = "wake lock: " + e.getMessage();
       Log.w(LOGTAG, "wake lock acquire failed", e);
+    }
+  }
+
+  /** 锁到底在不在手上——直接问系统，不吃可能过期的缓存标记。 */
+  public static boolean wakeLockHeld() {
+    LocationTrackingService svc = sInstance;
+    try {
+      return svc != null && svc.mWakeLock != null && svc.mWakeLock.isHeld();
+    } catch (Exception e) {
+      return false;
     }
   }
 
@@ -526,9 +560,33 @@ public class LocationTrackingService extends Service {
   // ---------------------------------------------------------------------------
 
   private void onTick() {
-    if (!sRunning || mStopping || mPendingFix) {
+    if (!sRunning || mStopping) {
+      return;
+    }
+    if (mPendingFix) {
+      // 上一拍的请求还没回：这拍不发请求，但取证时照样留一行——
+      // 网页算 tick 覆盖率量的是「进程还活着」，不是「请求发出去了」。
+      if (sConfig.diag) {
+        JSONObject sk = new JSONObject();
+        try {
+          sk.put("why", "pending-fix");
+          sk.put("waitMs", mCurrentIntervalMs);
+        } catch (Exception ignored) {
+        }
+        journal("skip", sk);
+      }
       scheduleNext(mCurrentIntervalMs);
       return;
+    }
+    if (sConfig.diag && !wakeLockHeld()) {
+      // 锁被系统收走 = 下一段熄屏一定会停拍，先记账再补拿一次
+      JSONObject lo = new JSONObject();
+      try {
+        lo.put("why", "wakelock-lost");
+      } catch (Exception ignored) {
+      }
+      journal("fail", lo);
+      acquireWakeLock();
     }
     sTicks++;
     mPendingFix = true;
@@ -798,7 +856,7 @@ public class LocationTrackingService extends Service {
       line.put("k", kind);
       line.put("n", sTicks);
       line.put("p", sProvider);
-      line.put("wl", sWakeLockHeld);
+      line.put("wl", wakeLockHeld());
       line.put("f", sFixes);
       line.put("x", sFailures);
       line.put("pts", sPoints);

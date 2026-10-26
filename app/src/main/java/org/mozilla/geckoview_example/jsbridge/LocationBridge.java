@@ -126,6 +126,13 @@ public class LocationBridge {
       if (!params.has("diag")) {
         cfg.diag = LocationConfig.load(mContext).diag;
       }
+      // 取证开着就不能停：页面一次 enabled=false 会把正在取证的采集停掉，
+      // 账本立刻一片空白，看起来就像「壳睡着了」——分不清是冻还是停。
+      boolean keptForDiag = false;
+      if (!cfg.enabled && cfg.diag) {
+        cfg.enabled = true;
+        keptForDiag = true;
+      }
       cfg.save(mContext);
       LocationTrackingService.applyConfig(mContext);
       // Auto start/stop by the page's enabled flag.
@@ -146,6 +153,10 @@ public class LocationBridge {
       r.put("tracking", LocationTrackingService.isRunning());
       // 开了自动打点但没权限：网页据此弹「请求定位权限」
       r.put("needPermission", cfg.enabled && !hasFineLocation());
+      if (keptForDiag) {
+        r.put("keptForDiag", true);
+        r.put("keptForDiagNote", "取证模式开着，enabled 被强行留在 true（要真停先关取证）");
+      }
       bridge.respond(id, true, r, null);
     } catch (Exception e) {
       Log.e(LOGTAG, "setConfig failed", e);
