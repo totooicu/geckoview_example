@@ -93,6 +93,15 @@ public class LocationTrackingService extends Service {
   /** 通知栏文案刷新节流：每次追加都通知会刷屏，够用就行。 */
   private static final long NOTIFY_THROTTLE_MS = 5000;
 
+  /** 取证账本：诊断模式下每秒一行，把「后台这一秒到底发生了什么」写进文件。 */
+  private static final String JOURNAL_FILE = "bg_journal.jsonl";
+
+  /** 账本上限，超了砍掉较旧的一半（约 1.5MB ≈ 1.2 万行），不吃手机存储。 */
+  private static final long JOURNAL_MAX_BYTES = 1500000L;
+
+  /** 取证模式的采样间隔：用户要求「每秒申请一次定位」。 */
+  private static final long DIAG_INTERVAL_MS = 1000L;
+
   /** 部分唤醒锁：熄屏后让 tick 与 GPS 回调照常到达。 */
   private static final String WAKE_LOCK_TAG = "dr:location-tracking";
 
@@ -133,6 +142,8 @@ public class LocationTrackingService extends Service {
   private static volatile long sFailures = 0;
   private static volatile String sLastError = "";
   private static volatile long sIntervalCurrentMs = 0;
+  /** tick 计数：诊断模式的「服务醒着跳了几次」，用来分清「被冻」与「取不到点」。 */
+  private static volatile long sTicks = 0;
   private static volatile long sLastNotifyAt = 0;
 
   public static boolean isRunning() {
@@ -166,6 +177,13 @@ public class LocationTrackingService extends Service {
       o.put("failures", sFailures);
       o.put("lastError", sLastError);
       o.put("intervalCurrentMs", sIntervalCurrentMs);
+      o.put("ticks", sTicks);
+      o.put("diag", sConfig.diag);
+      LocationTrackingService js = sInstance;
+      o.put("journalBytes",
+          js != null && js.mJournalFile != null && js.mJournalFile.exists()
+              ? js.mJournalFile.length()
+              : 0);
       return o;
     } catch (Exception e) {
       return new JSONObject();
@@ -204,6 +222,75 @@ public class LocationTrackingService extends Service {
       }
     }
     return o;
+  }
+
+  /**
+   * 读取证账本（location.journal）：since 只回这段时间之后的行，tail 限制条数。
+   * 页面拿这些行判「壳在后台有没有被休眠」：tick 行之间出现大空档 = 进程被冻，
+   * tick 连续但没有 fix 行 = 系统没送定位过来。
+   */
+  public static JSONObject journalJson(long since, int tail) {
+    JSONObject o = new JSONObject();
+    JSONArray lines = new JSONArray();
+    LocationTrackingService svc = sInstance;
+    File f = svc != null ? svc.mJournalFile : null;
+    long bytes = f != null && f.exists() ? f.length() : 0;
+    int total = 0;
+    try {
+      List<String> all = svc != null ? svc.readJournalLines() : new ArrayList<String>();
+      total = all.size();
+      int from = Math.max(0, total - Math.max(1, tail));
+      for (int i = from; i < total; i++) {
+        String line = all.get(i);
+        if (line == null || line.isEmpty()) {
+          continue;
+        }
+        try {
+          JSONObject j = new JSONObject(line);
+          if (since <= 0 || j.optLong("t") >= since) {
+            lines.put(j);
+          }
+        } catch (Exception ignored) {
+        }
+      }
+    } catch (Exception e) {
+      Log.e(LOGTAG, "journalJson failed", e);
+    }
+    try {
+      o.put("lines", lines);
+      o.put("count", lines.length());
+      o.put("total", total);
+      o.put("bytes", bytes);
+      o.put("ticks", sTicks);
+      o.put("diag", sConfig.diag);
+      o.put("tracking", sRunning);
+    } catch (Exception ignored) {
+    }
+    return o;
+  }
+
+  /** 开关取证模式：只改内存快照并重排采样，持久化由 LocationBridge 负责。 */
+  public static void notifyDiag(boolean on) {
+    LocationTrackingService svc = sInstance;
+    if (svc != null) {
+      svc.journal("diag", diagExtra(on));
+      if (sRunning) {
+        svc.mSameCount = 0;
+        svc.reschedule();
+      }
+    }
+    Log.i(LOGTAG, "diag mode " + (on ? "ON" : "OFF"));
+  }
+
+  private static JSONObject diagExtra(boolean on) {
+    try {
+      JSONObject e = new JSONObject();
+      e.put("on", on);
+      e.put("intervalMs", on ? DIAG_INTERVAL_MS : sConfig.intervalBaseMs);
+      return e;
+    } catch (Exception ex) {
+      return new JSONObject();
+    }
   }
 
   /** Clear all recorded points (location.clearHistory). */
@@ -249,6 +336,10 @@ public class LocationTrackingService extends Service {
   @Nullable private JSONObject mLastPoint;
   private long mLastPersistTs = 0;
   private File mLogFile;
+  /** 取证账本文件（app 私有目录，网页经 location.journal 读）。 */
+  private File mJournalFile;
+  private android.content.BroadcastReceiver mScreenReceiver;
+  private long mJournalWrites = 0;
   private boolean mPendingFix = false;
   private long mCurrentIntervalMs = 1000;
   private boolean mStopping = false;
@@ -270,12 +361,24 @@ public class LocationTrackingService extends Service {
 
         @Override
         public void onProviderEnabled(String provider) {
-          // ignore
+          JSONObject e = new JSONObject();
+          try {
+            e.put("provider", provider);
+            e.put("on", true);
+          } catch (Exception ignored) {
+          }
+          journal("provider", e);
         }
 
         @Override
         public void onProviderDisabled(String provider) {
-          // ignore
+          JSONObject e = new JSONObject();
+          try {
+            e.put("provider", provider);
+            e.put("on", false);
+          } catch (Exception ignored) {
+          }
+          journal("provider", e);
         }
       };
 
@@ -285,6 +388,8 @@ public class LocationTrackingService extends Service {
     mLocationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
     mProvider = pickProvider();
     mLogFile = new File(getFilesDir(), FILE_NAME);
+    mJournalFile = new File(getFilesDir(), JOURNAL_FILE);
+    registerScreenReceiver();
     createNotificationChannel();
     sInstance = this;
   }
@@ -320,6 +425,7 @@ public class LocationTrackingService extends Service {
    */
   @Override
   public void onTaskRemoved(Intent rootIntent) {
+    journal("taskRemoved", null);
     Log.i(LOGTAG, "onTaskRemoved: keep tracking (running=" + sRunning + ")");
     super.onTaskRemoved(rootIntent);
   }
@@ -350,9 +456,13 @@ public class LocationTrackingService extends Service {
     mCurrentIntervalMs = sConfig.intervalBaseMs;
     sIntervalCurrentMs = mCurrentIntervalMs;
     mProvider = pickProvider();
-    sProvider = mProvider;
+    if (sConfig.diag) {
+      mCurrentIntervalMs = DIAG_INTERVAL_MS;
+      sIntervalCurrentMs = DIAG_INTERVAL_MS;
+    }
     mHandler.removeCallbacks(mTick);
     mHandler.postDelayed(mTick, 0);
+    journal("start", null);
     Log.i(LOGTAG, "tracking started (" + reason + "), provider=" + mProvider
         + " strategy=" + sConfig.strategy + " interval=" + mCurrentIntervalMs + "ms");
     updateNotification(true);
@@ -369,6 +479,7 @@ public class LocationTrackingService extends Service {
     mHandler.removeCallbacks(mFixWatchdog);
     mPendingFix = false;
     releaseWakeLock();
+    journal("stop", null);
     Log.i(LOGTAG, "tracking stopped (" + reason + "), points=" + sPoints + " rev=" + sRev);
     stopForeground(STOP_FOREGROUND_REMOVE);
     stopSelf();
@@ -419,13 +530,24 @@ public class LocationTrackingService extends Service {
       scheduleNext(mCurrentIntervalMs);
       return;
     }
+    sTicks++;
     mPendingFix = true;
+    if (sConfig.diag) {
+      journal("tick", null);
+    }
     try {
       mLocationManager.requestSingleUpdate(mProvider, mFixListener, Looper.getMainLooper());
     } catch (SecurityException | IllegalArgumentException e) {
       Log.e(LOGTAG, "requestSingleUpdate failed", e);
       sFailures++;
       sLastError = "requestSingleUpdate: " + e.getMessage();
+      JSONObject err = new JSONObject();
+      try {
+        err.put("why", "requestSingleUpdate");
+        err.put("msg", String.valueOf(e.getMessage()));
+      } catch (Exception ignored) {
+      }
+      journal("fail", err);
       mPendingFix = false;
       // 提供者被关掉时换一个再试（GPS → 网络）
       mProvider = pickProvider();
@@ -443,6 +565,15 @@ public class LocationTrackingService extends Service {
       mPendingFix = false;
       sFailures++;
       sLastError = "取点超时（" + mCurrentIntervalMs + "ms 内没有回调）";
+      if (sConfig.diag) {
+        JSONObject to = new JSONObject();
+        try {
+          to.put("why", "timeout");
+          to.put("waitMs", mCurrentIntervalMs);
+        } catch (Exception ignored) {
+        }
+        journal("fail", to);
+      }
       Log.w(LOGTAG, "fix watchdog fired, provider=" + mProvider);
       mProvider = pickProvider();
       sProvider = mProvider;
@@ -463,6 +594,18 @@ public class LocationTrackingService extends Service {
     float accuracy = location.getAccuracy();
     sFixes++;
     sLastFixAt = now;
+    if (sConfig.diag) {
+      JSONObject fx = new JSONObject();
+      try {
+        // 账本存原生 WGS-84 原始坐标，页面负责换算成高德用的 GCJ-02
+        fx.put("lat", lat);
+        fx.put("lng", lng);
+        fx.put("acc", accuracy);
+        fx.put("fixTs", ts);
+      } catch (Exception ignored) {
+      }
+      journal("fix", fx);
+    }
     sLastError = "";
 
     JSONObject point = new JSONObject();
@@ -497,6 +640,10 @@ public class LocationTrackingService extends Service {
    * nextSampleMs): fixed = base; backoff = base * 2^n capped at max.
    */
   private long nextInterval() {
+    if (sConfig.diag) {
+      // 取证模式：固定每秒一次，不退避——要的是「后台每一秒都问一遍」的密集样本
+      return DIAG_INTERVAL_MS;
+    }
     if (LocationConfig.STRATEGY_FIXED.equals(sConfig.strategy)) {
       return sConfig.intervalBaseMs;
     }
@@ -640,6 +787,105 @@ public class LocationTrackingService extends Service {
   // File helpers
   // ---------------------------------------------------------------------------
 
+  /** 一行一条 JSON 追加写；文件过大时丢掉较旧的一半。 */
+  private void journal(String kind, @Nullable JSONObject extra) {
+    if (mJournalFile == null) {
+      return;
+    }
+    try {
+      JSONObject line = new JSONObject();
+      line.put("t", System.currentTimeMillis());
+      line.put("k", kind);
+      line.put("n", sTicks);
+      line.put("p", sProvider);
+      line.put("wl", sWakeLockHeld);
+      line.put("f", sFixes);
+      line.put("x", sFailures);
+      line.put("pts", sPoints);
+      if (sConfig != null) {
+        line.put("diag", sConfig.diag);
+      }
+      if (extra != null) {
+        java.util.Iterator<String> it = extra.keys();
+        while (it.hasNext()) {
+          String key = it.next();
+          line.put(key, extra.get(key));
+        }
+      }
+      synchronized (this) {
+        try (FileOutputStream fos = new FileOutputStream(mJournalFile, true);
+            OutputStreamWriter w = new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
+          w.write(line.toString());
+          w.write("\n");
+          w.flush();
+        }
+        mJournalWrites++;
+        if (mJournalWrites % 200 == 0 && mJournalFile.length() > JOURNAL_MAX_BYTES) {
+          List<String> keep = readJournalLines();
+          int half = keep.size() / 2;
+          keep = keep.subList(half, keep.size());
+          try (FileOutputStream fos = new FileOutputStream(mJournalFile, false);
+              OutputStreamWriter w = new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
+            for (String l : keep) {
+              w.write(l);
+              w.write("\n");
+            }
+            w.flush();
+          }
+          Log.i(LOGTAG, "journal trimmed to " + keep.size() + " lines");
+        }
+      }
+    } catch (Exception e) {
+      Log.w(LOGTAG, "journal write failed", e);
+    }
+  }
+
+  private List<String> readJournalLines() {
+    List<String> out = new ArrayList<>();
+    File f = mJournalFile;
+    if (f == null || !f.exists()) {
+      return out;
+    }
+    try (BufferedReader reader =
+        new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (!line.isEmpty()) {
+          out.add(line);
+        }
+      }
+    } catch (Exception e) {
+      Log.e(LOGTAG, "readJournal failed", e);
+    }
+    return out;
+  }
+
+  /** 熄屏/亮屏/解锁都记账：休眠分析要把「亮灭屏」和「tick 空档」对齐看。 */
+  private void registerScreenReceiver() {
+    try {
+      android.content.IntentFilter filter = new android.content.IntentFilter();
+      filter.addAction(Intent.ACTION_SCREEN_OFF);
+      filter.addAction(Intent.ACTION_SCREEN_ON);
+      filter.addAction(Intent.ACTION_USER_PRESENT);
+      mScreenReceiver =
+          new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, android.content.Intent intent) {
+              String a = intent != null ? intent.getAction() : null;
+              JSONObject e = new JSONObject();
+              try {
+                e.put("what", a);
+              } catch (Exception ignored) {
+              }
+              journal("screen", e);
+            }
+          };
+      registerReceiver(mScreenReceiver, filter);
+    } catch (Exception e) {
+      Log.w(LOGTAG, "screen receiver not registered", e);
+    }
+  }
+
   private List<String> readLines() {
     List<String> lines = new ArrayList<>();
     if (mLogFile == null || !mLogFile.exists()) {
@@ -745,6 +991,14 @@ public class LocationTrackingService extends Service {
 
   @Override
   public void onDestroy() {
+    journal("destroy", null);
+    if (mScreenReceiver != null) {
+      try {
+        unregisterReceiver(mScreenReceiver);
+      } catch (Exception ignored) {
+      }
+      mScreenReceiver = null;
+    }
     if (sRunning) {
       sRunning = false;
       mHandler.removeCallbacks(mTick);

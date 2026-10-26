@@ -29,6 +29,11 @@ import org.json.JSONObject;
  *   <li>location.status — {tracking, startedAt, points, rev, lastPoint, wakeLock,
  *       provider, lastFixAt, fixes, failures, lastError, intervalCurrentMs,
  *       fineLocation, backgroundLocation, batteryOptimized, config:{...}}.</li>
+ *   <li>location.setDiag {on} — 取证模式：每秒申请一次定位 + 写 bg_journal.jsonl
+ *       账本（tick/fix/fail/screen/provider/start/stop/taskRemoved/destroy）。</li>
+ *   <li>location.journal {since?, tail?} → {lines, count, total, bytes, ticks, diag,
+ *       tracking} — 网页据此判「壳在后台是被冻住了，还是醒着取不到点」。</li>
+ *   <li>location.clearJournal — 换一轮实验时清空账本。</li>
  *   <li>location.getHistory — all recorded points ({points:[...], rev:N}) so the
  *       page can merge them through its own appendPoint().</li>
  *   <li>location.clearHistory — wipe the recorded points.</li>
@@ -81,8 +86,17 @@ public class LocationBridge {
       case "location.status":
         handleStatus(id, bridge);
         break;
+      case "location.setDiag":
+        handleSetDiag(id, params, bridge);
+        break;
+      case "location.journal":
+        handleJournal(id, params, bridge);
+        break;
       case "location.getHistory":
         handleGetHistory(id, bridge);
+        break;
+      case "location.clearJournal":
+        handleClearJournal(id, bridge);
         break;
       case "location.clearHistory":
         handleClearHistory(id, bridge);
@@ -108,6 +122,10 @@ public class LocationBridge {
   private void handleSetConfig(String id, JSONObject params, JsBridge bridge) {
     try {
       LocationConfig cfg = LocationConfig.fromJson(params.toString());
+      // 老页面不带 diag：别把正在进行的取证模式静默关掉
+      if (!params.has("diag")) {
+        cfg.diag = LocationConfig.load(mContext).diag;
+      }
       cfg.save(mContext);
       LocationTrackingService.applyConfig(mContext);
       // Auto start/stop by the page's enabled flag.
@@ -270,6 +288,55 @@ public class LocationBridge {
       bridge.respond(id, true, r, null);
     } catch (Exception e) {
       bridge.respond(id, false, null, "requestBatteryExemption: " + e.getMessage());
+    }
+  }
+
+  /**
+   * 开关取证模式：写进配置存档（系统重建服务也还知道在取证），并立刻按每秒一次
+   * 重排采样。打开时顺带把 enabled 也打开——不然取证没意义（根本没在采集）。
+   */
+  private void handleSetDiag(String id, JSONObject params, JsBridge bridge) {
+    try {
+      boolean on = params.optBoolean("on", false);
+      LocationConfig cfg = LocationConfig.load(mContext);
+      cfg.diag = on;
+      if (on) {
+        cfg.enabled = true;
+      }
+      cfg.save(mContext);
+      LocationTrackingService.applyConfig(mContext);
+      LocationTrackingService.notifyDiag(on);
+      JSONObject r = LocationTrackingService.statusJson();
+      r.put("diag", on);
+      r.put("enabled", cfg.enabled);
+      r.put("needPermission", cfg.enabled && !hasFineLocation());
+      if (on && !LocationTrackingService.isRunning() && hasFineLocation()) {
+        startService();
+      }
+      bridge.respond(id, true, r, null);
+    } catch (Exception e) {
+      bridge.respond(id, false, null, "setDiag: " + e.getMessage());
+    }
+  }
+
+  /** 读取证账本：{since?, tail?}，默认最近 3000 行。 */
+  private void handleJournal(String id, JSONObject params, JsBridge bridge) {
+    long since = params.optLong("since", 0);
+    int tail = (int) Math.max(1, Math.min(50000, params.optInt("tail", 3000)));
+    bridge.respond(id, true, LocationTrackingService.journalJson(since, tail), null);
+  }
+
+  /** 清空账本：换一轮实验时用，免得上一轮的记录混进分析。 */
+  private void handleClearJournal(String id, JsBridge bridge) {
+    try {
+      java.io.File f = new java.io.File(mContext.getFilesDir(), "bg_journal.jsonl");
+      boolean gone = !f.exists() || f.delete();
+      JSONObject r = new JSONObject();
+      r.put("cleared", gone);
+      r.put("bytes", f.exists() ? f.length() : 0);
+      bridge.respond(id, true, r, null);
+    } catch (Exception e) {
+      bridge.respond(id, false, null, "clearJournal: " + e.getMessage());
     }
   }
 

@@ -102,3 +102,24 @@ tick(按策略定时) → requestSingleUpdate(provider)
   目前只靠 `START_STICKY` 重建（重建时机由系统定，不保证准点）。
 - **轨迹质量**：只有阈值去重，没有速度/漂移过滤；后台期间 GPS 冷启动的第一个点
   可能偏差较大（看 `accuracy`）。
+## 七、取证账本（0.3.1-tune）：把「后台这一秒发生了什么」落成文件
+
+光看最终点数分不清两件事：**进程被系统冻住**，还是**醒着但系统不给定位**。
+所以加一本逐秒账本，网页测试端（定位磨合台）读它来判。
+
+- 开关：桥动作 `location.setDiag {on}`。打开后采样**固定每秒一次**（`nextInterval()`
+  直接返回 DIAG_INTERVAL_MS，不退避），并顺带把 `enabled` 打开——没在采集的取证没意义。
+  `diag` 随 `LocationConfig` 落 SharedPreferences，服务被系统重建后仍在取证。
+- 记账：`bg_journal.jsonl`（app 私有目录，一行一条 JSON，追加写；超过 1.5MB 砍掉旧的一半）。
+  每行公共字段：`t`（时刻）、`k`（类型）、`n`（tick 序号）、`p`（provider）、`wl`（唤醒锁）、
+  `f`（累计取点）、`x`（累计失败）、`pts`（点数）、`diag`。
+  类型：`tick` 每秒申请一次 / `fix` 申请成功并带 `lat,lng,acc,fixTs`（WGS-84 原始值）/
+  `fail` 申请失败或取点超时（带 `why`）/ `screen` 灭屏亮屏解锁（`what`）/
+  `provider` 开关定位服务 / `start`、`stop` / `taskRemoved`（用户划掉任务）/
+  `destroy`（服务销毁，进程若被杀这条是最后一证）/ `diag`（开关取证）。
+- 读：`location.journal {since?, tail?}` → `{lines, count, total, bytes, ticks, diag, tracking}`；
+  `location.clearJournal` 换一轮实验时清空。`location.status` 新增 `ticks`、`diag`、`journalBytes`。
+- 网页侧的判读：账本里 **tick 序号连续、时间戳也连续** → 壳没睡；
+  **tick 之间出现大空档** → 那段时间被冻结（对齐 `screen` 行看是不是熄屏引起）；
+  **tick 连续但没有 fix 行** → 醒着但拿不到定位（多为没给「始终允许」或 provider 被省电掐掉）。
+- 老页面不带 `diag` 字段时，`location.setConfig` 会保留现有取证开关，不会被静默关掉。

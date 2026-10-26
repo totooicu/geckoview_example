@@ -52,6 +52,14 @@ public class LocationConfig {
   /** Base interval: delay after a new point / fixed-mode cadence. */
   public volatile long intervalBaseMs = 1000;
 
+  /**
+   * 取证模式（diag）：每秒申请一次定位、不做退避，并把每一秒发生了什么追加写进
+   * bg_journal.jsonl（tick / fix / fail / screen / provider / start / stop /
+   * taskRemoved / destroy / diag）。网页测试端读 location.journal 判壳在后台
+   * 有没有被系统休眠。默认关，避免长期吃存储与耗电。
+   */
+  public volatile boolean diag = false;
+
   /** Ceiling of the exponential backoff. */
   public volatile long intervalMaxMs = 64000;
 
@@ -69,6 +77,9 @@ public class LocationConfig {
       cfg.thresholdM = normalizeNonNegative(o, "thresholdM", 5);
       cfg.moveThresholdM = normalizePositive(o, "moveThresholdM", 10.0);
       cfg.strategy = normalizeStrategy(o, "strategy", STRATEGY_BACKOFF);
+      if (o.has("diag")) {
+        cfg.diag = o.optBoolean("diag", false);
+      }
       cfg.intervalBaseMs = normalizePositive(o, "intervalBaseMs", 1000L);
       cfg.intervalMaxMs = normalizePositive(o, "intervalMaxMs", 64000L);
       if (cfg.intervalMaxMs < cfg.intervalBaseMs) {
@@ -125,6 +136,7 @@ public class LocationConfig {
     try {
       JSONObject o = new JSONObject();
       o.put("enabled", enabled);
+      o.put("diag", diag);
       o.put("thresholdM", thresholdM);
       o.put("moveThresholdM", moveThresholdM);
       o.put("strategy", strategy);

@@ -351,6 +351,7 @@ public class WebViewActivity extends AppCompatActivity {
     try {
       org.json.JSONObject o = new org.json.JSONObject();
       o.put("enabled", cfg.enabled);
+      o.put("diag", cfg.diag);
       o.put("thresholdM", cfg.thresholdM);
       o.put("moveThresholdM", cfg.moveThresholdM);
       o.put("strategy", cfg.strategy);
