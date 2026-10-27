@@ -28,8 +28,8 @@ android {
         applicationId "org.mozilla.geckoview_example"
         minSdk 26
         targetSdk 36
-        versionCode 6
-        versionName "0.3.3-tune"
+        versionCode 7
+        versionName "0.3.4-tune"
         // 版本时间：写死为「提交 GitHub 的时间」（Asia/Shanghai），发版流程见
         // CLAUDE.md「版本对齐」：push 到 GitHub 后，把该提交时间更新到这里，
         // 网页经 getEnv().builtAt 查询，版本条显示「壳 x.y.z（MM-dd HH:mm @ …）」。

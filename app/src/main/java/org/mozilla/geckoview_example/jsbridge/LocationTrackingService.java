@@ -88,6 +88,14 @@ public class LocationTrackingService extends Service {
   public static final String ACTION_STOP = "org.mozilla.geckoview_example.LOCATION_STOP";
   /** 闹钟心跳：取证模式下每 60 秒醒一次，用来分清「进程被冻」和「线程被挂起」。 */
   public static final String ACTION_WAKE = "org.mozilla.geckoview_example.LOCATION_WAKE";
+  /**
+   * 自启网（{@link RecoveryArm}）借 {@link #ACTION_WAKE} 同一个入口进来，用这一条 extra
+   * 说明是哪张网敲的门（{@code sweep} / {@code boot} / {@code task-removed} / {@code job}…），
+   * 账本里的 {@code why} 就是它。<b>真值在 requestCode 上</b>（{@code PendingIntent} 匹配
+   * 不看 extras），extras 只是给读代码的人看的副本。
+   */
+  public static final String EXTRA_RECOVERY_WHY =
+      "org.mozilla.geckoview_example.RECOVERY_WHY";
 
   /** 闹钟间隔：60 秒。setAndAllowWhileIdle 在 Doze 里也是系统能给你的最密档位。 */
   private static final long WAKE_ALARM_MS = 60000L;
@@ -168,6 +176,14 @@ public class LocationTrackingService extends Service {
 
   /** Snapshot for location.status. */
   public static JSONObject statusJson() {
+    return statusJson(sInstance);
+  }
+
+  /**
+   * 同上，但要带一个 Context 才报得出「自启的网排上了没有」——服务停着的时候恰恰最想看
+   * 这一项，那时 {@code sInstance} 是空的，只能靠调用方（桥）手里的上下文去查系统记账。
+   */
+  public static JSONObject statusJson(@Nullable Context ctx) {
     try {
       JSONObject o = new JSONObject();
       o.put("tracking", sRunning);
@@ -196,6 +212,9 @@ public class LocationTrackingService extends Service {
           js != null && js.mJournalFile != null && js.mJournalFile.exists()
               ? js.mJournalFile.length()
               : 0);
+      // 自启诊断：{alarms:[sweep,…], job:bool, exact:bool}——网页据此回答
+      // 「被杀了还能不能自己回来」，空数组 = 现在一张网都没有。
+      o.put("recovery", ctx != null ? RecoveryArm.state(ctx) : new JSONObject());
       return o;
     } catch (Exception e) {
       return new JSONObject();
@@ -418,6 +437,12 @@ public class LocationTrackingService extends Service {
       return START_NOT_STICKY;
     }
     if (intent != null && ACTION_WAKE.equals(intent.getAction())) {
+      String why = intent.getStringExtra(EXTRA_RECOVERY_WHY);
+      if (why != null && !why.isEmpty()) {
+        // 自启网敲门：另一条路，别和 60 秒心跳的记账混在一起。
+        onRecovery(why);
+        return sRunning ? START_STICKY : START_NOT_STICKY;
+      }
       // 闹钟这条路径自己收尾：不走下面的 enabled 判断，免得把自己停掉。
       onWakeAlarm();
       return sRunning ? START_STICKY : START_NOT_STICKY;
@@ -448,6 +473,13 @@ public class LocationTrackingService extends Service {
   @Override
   public void onTaskRemoved(Intent rootIntent) {
     journal("taskRemoved", null);
+    // 划掉任务在很多 ROM 上等于 force-stop：进程随时跟着没。趁这一刻进程还活着、
+    // 还在「用户刚操作过」的窗口里，先把 30 秒后的那张网排下去当遗言——排网这件事
+    // 死后就做不了了。
+    if (sConfig != null && sConfig.enabled) {
+      RecoveryArm.fromTaskRemoved(this);
+      journal("recover", recoverExtra(RecoveryArm.WHY_TASK_REMOVED, "task-removed"));
+    }
     Log.i(LOGTAG, "onTaskRemoved: keep tracking (running=" + sRunning + ")");
     super.onTaskRemoved(rootIntent);
   }
@@ -469,6 +501,8 @@ public class LocationTrackingService extends Service {
     }
     acquireWakeLock();
     armWakeAlarm();
+    // 自启的网：这一刻起，进程哪怕没了，闹钟/任务/广播还会回来敲门。
+    RecoveryArm.armNets(this);
 
     restoreTailFromFile();
     sRunning = true;
@@ -523,6 +557,11 @@ public class LocationTrackingService extends Service {
     mPendingFix = false;
     releaseWakeLock();
     cancelWakeAlarm();
+    if (sConfig != null && !sConfig.enabled) {
+      // 用户是真关了就撤网；只是停一下服务（enabled 还开着）时必须留着网，
+      // 不然「停了就再也起不来」和「关了还白敲门」两头都错了。
+      RecoveryArm.cancelAll(this);
+    }
     journal("stop", stopExtra(reason));
     Log.i(LOGTAG, "tracking stopped (" + reason + "), points=" + sPoints + " rev=" + sRev);
     stopForeground(STOP_FOREGROUND_REMOVE);
@@ -716,6 +755,63 @@ public class LocationTrackingService extends Service {
         Log.w(LOGTAG, "wake resume blocked", e);
       }
     }
+  }
+
+  /**
+   * 自启网来敲门了（{@code boot} / {@code screen-on} / {@code unlock} / {@code replaced} /
+   * {@code task-removed} / {@code sweep} / {@code sweep-exact} / {@code job}）。
+   *
+   * <p>这一跳往往是「进程刚被杀完」的第一次执行，所以活没活都要先记账，再决定拉不拉：
+   * 只认持久化的 {@code enabled} 和权限，用户关掉了就顺手把网撤干净。{@code startTracking}
+   * 内部会重新补齐网，接回链的同时也把下一轮的门排好。</p>
+   */
+  private void onRecovery(String why) {
+    if (!sRunning) {
+      sConfig = LocationConfig.load(this);
+    }
+    journal("recover", recoverExtra(why, "service"));
+    if (sRunning) {
+      RecoveryArm.armNets(this);
+      return;
+    }
+    if (sConfig == null || !sConfig.enabled) {
+      RecoveryArm.cancelAll(this);
+      return;
+    }
+    if (!hasFineLocation()) {
+      Log.i(LOGTAG, "recovery (" + why + ") skipped: no fine location permission");
+      return;
+    }
+    try {
+      startTracking(why);
+    } catch (Exception e) {
+      // Android 12+ 后台起前台服务会被拒；拒了就明明白白记一行，别让它静默失效。
+      JSONObject bad = new JSONObject();
+      try {
+        bad.put("why", "recover-blocked");
+        bad.put("stage", why);
+        bad.put("msg", String.valueOf(e.getMessage()));
+      } catch (Exception ignored) {
+      }
+      journal("fail", bad);
+      Log.w(LOGTAG, "recovery start blocked (" + why + ")", e);
+    }
+  }
+
+  /** 自启一跳的随记：谁敲的门、在哪个阶段、当时什么状态。 */
+  private JSONObject recoverExtra(String why, String stage) {
+    JSONObject o = new JSONObject();
+    try {
+      o.put("why", why);
+      o.put("stage", stage);
+      o.put("enabled", sConfig != null && sConfig.enabled);
+      o.put("running", sRunning);
+      o.put("diag", sConfig != null && sConfig.diag);
+      o.put("exact", RecoveryArm.canExact(this));
+      o.put("job", RecoveryArm.jobScheduled(this));
+    } catch (Exception ignored) {
+    }
+    return o;
   }
 
   private void releaseWakeLock() {
@@ -1019,6 +1115,46 @@ public class LocationTrackingService extends Service {
   // File helpers
   // ---------------------------------------------------------------------------
 
+  /**
+   * 接收器 / 周期任务那一层没有服务实例——服务可能压根没起来（Android 12+ 后台起前台服务
+   * 会被拒），而那一跳恰恰是最要留证的：门有没有敲到、有没有被拒。手机上看不到 logcat，
+   * 所以直接往同一本账本追加一行；服务实例在的时候一律走 {@link #journal}，两套判读不劈叉。
+   */
+  static void journalStatic(Context ctx, String kind, @Nullable JSONObject extra) {
+    LocationTrackingService js = sInstance;
+    if (js != null) {
+      js.journal(kind, extra);
+      return;
+    }
+    try {
+      File f = new File(ctx.getApplicationContext().getFilesDir(), JOURNAL_FILE);
+      if (f.length() > JOURNAL_MAX_BYTES) {
+        return; // 账本满了：这条路径不复制裁剪逻辑，宁可少一行也别把文件写坏
+      }
+      JSONObject line = new JSONObject();
+      line.put("t", System.currentTimeMillis());
+      line.put("k", kind);
+      line.put("n", sTicks);
+      line.put("wl", wakeLockHeld());
+      line.put("diag", sConfig != null && sConfig.diag);
+      if (extra != null) {
+        java.util.Iterator<String> it = extra.keys();
+        while (it.hasNext()) {
+          String key = it.next();
+          line.put(key, extra.get(key));
+        }
+      }
+      try (FileOutputStream fos = new FileOutputStream(f, true);
+          OutputStreamWriter w = new OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
+        w.write(line.toString());
+        w.write("\n");
+        w.flush();
+      }
+    } catch (Exception e) {
+      Log.w(LOGTAG, "journalStatic failed", e);
+    }
+  }
+
   /** 一行一条 JSON 追加写；文件过大时丢掉较旧的一半。 */
   private void journal(String kind, @Nullable JSONObject extra) {
     if (mJournalFile == null) {
@@ -1244,6 +1380,8 @@ public class LocationTrackingService extends Service {
   @Override
   public void onDestroy() {
     journal("destroy", null);
+    boolean wasRunning = sRunning;
+    boolean askedToStop = mStopping;
     if (mScreenReceiver != null) {
       try {
         unregisterReceiver(mScreenReceiver);
@@ -1258,6 +1396,38 @@ public class LocationTrackingService extends Service {
     }
     releaseWakeLock();
     cancelWakeAlarm();
+    if (!askedToStop && sConfig != null && sConfig.enabled) {
+      // 不是页面/用户要停的销毁（系统回收内存、划掉任务后的清理）：趁这一刻进程还活着
+      // 把网补齐，再试着把前台身份抢回来——只要还是前台服务，普通 kill 就杀不掉进程。
+      RecoveryArm.armNets(this);
+      JSONObject a = new JSONObject();
+      try {
+        a.put("why", "destroy-while-enabled");
+        a.put("stage", "arm");
+        a.put("enabled", true);
+        a.put("wasRunning", wasRunning);
+      } catch (Exception ignored) {
+      }
+      journal("recover", a);
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+          startForeground(
+              NOTIFICATION_ID,
+              buildNotification(),
+              ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+        } else {
+          startForeground(NOTIFICATION_ID, buildNotification());
+        }
+      } catch (Exception e) {
+        JSONObject bad = new JSONObject();
+        try {
+          bad.put("why", "keep-foreground-failed");
+          bad.put("msg", String.valueOf(e.getMessage()));
+        } catch (Exception ignored) {
+        }
+        journal("fail", bad);
+      }
+    }
     if (sInstance == this) {
       sInstance = null;
     }

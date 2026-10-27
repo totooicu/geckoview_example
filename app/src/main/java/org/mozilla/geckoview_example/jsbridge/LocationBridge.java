@@ -317,7 +317,7 @@ public class LocationBridge {
       cfg.save(mContext);
       LocationTrackingService.applyConfig(mContext);
       LocationTrackingService.notifyDiag(on);
-      JSONObject r = LocationTrackingService.statusJson();
+      JSONObject r = LocationTrackingService.statusJson(mContext);
       r.put("diag", on);
       r.put("enabled", cfg.enabled);
       r.put("needPermission", cfg.enabled && !hasFineLocation());
@@ -357,7 +357,7 @@ public class LocationBridge {
 
   private void handleClearHistory(String id, JsBridge bridge) {
     LocationTrackingService.clearHistory();
-    bridge.respond(id, true, LocationTrackingService.statusJson(), null);
+    bridge.respond(id, true, LocationTrackingService.statusJson(mContext), null);
   }
 
   /* ----------------------------------------------------------------------------
@@ -365,7 +365,7 @@ public class LocationBridge {
    * -------------------------------------------------------------------------- */
 
   private JSONObject status() {
-    JSONObject o = LocationTrackingService.statusJson();
+    JSONObject o = LocationTrackingService.statusJson(mContext);
     try {
       LocationConfig cfg = LocationConfig.load(mContext);
       o.put("enabled", cfg.enabled);

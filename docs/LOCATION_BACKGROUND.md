@@ -44,8 +44,11 @@ Chromium 会把页面的 JS 定时器冻住，打点就断了；熄屏更彻底�
 
 | 位置 | 做了什么 |
 | --- | --- |
-| `AndroidManifest.xml` | `ACCESS_BACKGROUND_LOCATION`、`FOREGROUND_SERVICE_LOCATION`、`WAKE_LOCK`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`；声明 `LocationTrackingService`（`foregroundServiceType="location"`） |
-| `LocationTrackingService` | 前台服务 + 唤醒锁；`START_STICKY` + 只认 enabled 的恢复语义；`onTaskRemoved` 不自杀；JSONL 落盘；通知栏活体证据；诊断字段 |
+| `AndroidManifest.xml` | `ACCESS_BACKGROUND_LOCATION`、`FOREGROUND_SERVICE_LOCATION`、`WAKE_LOCK`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`；声明 `LocationTrackingService`（`foregroundServiceType="location"`）；自启组：`RECEIVE_BOOT_COMPLETED`、`SCHEDULE_EXACT_ALARM` + `RecoveryReceiver`（静态注册）+ `RecoveryJobService`（`BIND_JOB_SERVICE`） |
+| `LocationTrackingService` | 前台服务 + 唤醒锁；`START_STICKY` + 只认 enabled 的恢复语义；`onTaskRemoved` 不自杀，临走前把 30 秒后的网排下去当遗言；`onDestroy` 若并非用户/页面要停，补齐网并重新 `startForeground` 抢回前台身份；JSONL 落盘；通知栏活体证据；诊断字段；`journalStatic` 让「服务还没起来」的那一跳也留痕 |
+| `RecoveryArm` | 排网的唯一出口：一张网一个 `requestCode`（7702 起，7701 是 60 秒心跳闹钟），`setRepeating` 兜底网 + `setExactAndAllowWhileIdle` 精确网 + 15 分钟 `setPersisted` 周期任务；已经排着的网**不重排**（重排等于把下一次敲门一直往后推，「刚敲完门就被杀」要等满一轮）；`gate()` 只认持久化的 `enabled` + 精确定位权限；`state()` 报「网还在不在」 |
+| `RecoveryReceiver` | 清单静态注册的自启网：`BOOT_COMPLETED`（含厂商 `QUICKBOOT_POWERON`）、`SCREEN_ON`、`USER_PRESENT`、`MY_PACKAGE_REPLACED`。广播里**不**直接起前台服务（Android 12+ 会拒，且拒一次就把这张网烧掉），只排一个 8 秒后的闹钟；enabled=false 时顺手撤网 |
+| `RecoveryJobService` | 第二道兜底：15 分钟周期 + `setPersisted(true)`（跨整机重启由系统恢复）；到点同样先记账再决定拉不拉 |
 | `LocationBridge` | `location.*` 全部动作：`setConfig / start / stop / status / getHistory / clearHistory`，新增 `requestPermissions`、`batteryOptimization`、`requestBatteryExemption`；取证组 `setDiag / journal / clearJournal`；事件 `location.point`、`location.state` |
 | `WebViewActivity` | 正式包 `DEFAULT_URL` 仍是站点根路径（磨合期在 `feat/location-tune` 上指向定位磨合台）；`onPageFinished` 后 `pullLocationConfig()` 主动读页面的 `dr.autoLocation`（页面一次桥都没调也不怕） |
 | `JsBridge` | 路由 `location.` 前缀；`PERM_LOCATION` 权限码；`location()` 访问器 |
@@ -79,6 +82,7 @@ tick(按策略定时) → requestSingleUpdate(provider)
 | `lastError` | 最近一次失败原因（取点超时、权限、提供者被关…） |
 | `intervalCurrentMs` | 当前处于哪一档间隔（退避到第几档一眼可见） |
 | `fineLocation` / `backgroundLocation` / `batteryOptimized` | 权限与省电状态 |
+| `recovery` | 自启的网：`{alarms:["sweep",…], job:true, exact:true}`；`alarms` 空 = 一张闹钟网都没排上，`job` = 15 分钟周期任务在不在，`exact` = 有没有精确闹钟权限 |
 
 ## 四、测试步骤（配合定位磨合台）
 
@@ -94,14 +98,15 @@ tick(按策略定时) → requestSingleUpdate(provider)
 
 ## 五、已知边界（本分支没做 / 做不到的）
 
-- **开机自启**：没有加 `BOOT_COMPLETED` 接收器。要加的话应该做成可选开关，
-  免得用户以为关过的东西开机又活了。
+- **开机自启**：0.3.4-tune 起已经做了（见 §十一），但仍**不是**用户可关的独立开关——
+  现在拿「自动打点」的 `enabled` 当唯一开关：关了就撤网，绝不在用户明确关掉之后又开机复活。
 - **国产 ROM 的自启动/省电策略**：壳只能引导（电池优化弹窗、设置页），
   「应用启动管理」这类厂商入口必须用户手动放行，任何 App 都绕不过。
 - **Android 11+ 的后台定位权限**：只能跳系统设置由用户选「始终允许」，
   不能再靠一次运行时弹窗拿到。
-- **兜底调度**：没接 WorkManager/AlarmManager 兜底；如果系统把前台服务也干掉，
-  目前只靠 `START_STICKY` 重建（重建时机由系统定，不保证准点）。
+- **兜底调度**：0.3.4-tune 起接了 AlarmManager（`setRepeating` + 有权限时
+  `setExactAndAllowWhileIdle`）+ 15 分钟 `setPersisted` 周期任务 + 静态广播，
+  不再只靠 `START_STICKY` 那一次不保证准点的重建。
 - **轨迹质量**：只有阈值去重，没有速度/漂移过滤；后台期间 GPS 冷启动的第一个点
   可能偏差较大（看 `accuracy`）。
 ## 七、取证账本（0.3.1-tune）：把「后台这一秒发生了什么」落成文件
@@ -188,3 +193,65 @@ tick 覆盖率 98%，每一拍都取得到点。剩下要回答的是「以后�
 壳侧待办（下一个 tune）：取证模式下让 `tick` 走独立的一秒链（每个整秒点 `postDelayed` 到下一整秒），
 上一发没落定就写 `skip{why:'pending-fix'}`，落定才写 `fix`/`fail`——这样覆盖率才真的等于
 「进程活着的时间占比」，熄屏取点慢只会体现为 skip 变多，而不是把覆盖率数字带崩。
+
+## 十一、被杀之后还能自己回来（0.3.4-tune：自启与接链）
+
+前面四件事管的是「服务起来了别再被打断」，这一节管另一种死法：**进程已经没了**。
+进程没了以后，壳自己什么都做不了——能敲门的只剩系统还记着的东西。所以这轮一次排了四张网，
+每张盖一种死法，代码集中在 `RecoveryArm`（排网）、`RecoveryReceiver`（广播）、
+`RecoveryJobService`（周期任务）三处，服务只多了一条 `onRecovery(why)` 入口。
+
+| 死法 | 谁能救 | 到点后的 reason（账本 `why` 字段） |
+| --- | --- | --- |
+| 系统回收内存 / 服务被单独干掉，进程还在 | `START_STICKY` 重建 + 60 秒心跳闹钟（原有） | `system-restart` / `wake-resume` |
+| 划掉最近任务（多数 ROM 等同 force-stop） | `onTaskRemoved` 临走的遗言闹钟，30 秒后 | `task-removed` |
+| 进程死了且没人再打开壳 | 12 分钟 `setRepeating` 兜底网（有精确权限时另加一条准点的） | `sweep` / `sweep-exact` |
+| 整机重启 | `BOOT_COMPLETED`（含厂商 `QUICKBOOT_POWERON`）+ 15 分钟 `setPersisted` 任务 | `boot` / `job` |
+| 被清网之后（force-stop 把闹钟任务全清了） | 用户下一次亮屏 / 解锁 / 覆盖安装 —— 静态广播 | `screen-on` / `unlock` / `replaced` |
+
+四张网全都要过同一道门 `RecoveryArm.gate()`：持久化的 `enabled` 还开着 **且** 精确定位权限还在 **且**
+服务当前没在跑。用户关掉了自动打点，接收器与任务反而负责**撤网**（`cancelAll`），不会「以为关过的东西
+开机又活了」；只是从页面点「停止」（`enabled` 还开着）时不撤网——那是暂停，不是关门。
+
+### 三条实现上的坑（写错就白排）
+
+- **`PendingIntent` 的匹配不看 extras**。`filterEquals` 只比 action / data / type / class / categories，
+  七张网要是共用一个 `requestCode`，后排的顶掉先排的，reason 也会串。所以 reason 编进 `requestCode`
+  （`7702 + 序号`，和 60 秒心跳的 7701 隔开），extras 只是给人看的副本。
+- **广播里不直接起前台服务**。Android 12+ 后台起 FGS 会被 `ForegroundServiceStartNotAllowedException`
+  拒，接收器那 10 秒窗口在很多 ROM 上不算「前台」；拒一次就把这张网白烧一回。规矩是排一个 8 秒后的
+  闹钟，让「起服务」那一跳落在闹钟上（闹钟那一跳有豁免，而且失败还能被账本看到）。`RecoveryArm.fromBroadcast`
+  里保留了一次直接尝试，纯当对照实验，失败不影响闹钟。
+- **周期任务的下限就是 15 分钟**（API 24+），所以它当不了唯一的网；`setPersisted(true)` 又要求清单里有
+  `RECEIVE_BOOT_COMPLETED`，两条是绑在一起的。
+
+### 记账
+
+- 新行 `recover{why, stage, enabled, running, exact, job}`：`stage` 取 `broadcast`（接收器，服务还没起来）、
+  `task-removed`（遗言）、`job`（周期任务）、`arm`（`onDestroy` 抢前台）、`service`（敲门后落到服务）。
+  **不加 diag 门槛**——自启这件事平时也要留痕，不然出事那一次恰好没记。
+- 服务还没起来时没有实例可写账，所以多了 `LocationTrackingService.journalStatic(ctx, kind, extra)`：
+  直接往同一本 `bg_journal.jsonl` 追加，账本超限时宁可少一行也不复制裁剪逻辑。
+- 被拒的两种情况各留一行 `fail`：`why=recover-blocked`（闹钟/广播敲门后起不来，带 `stage` 说明是哪张网）、
+  `why=keep-foreground-failed`（`onDestroy` 里抢前台身份失败）。
+- `location.status` 多一个 `recovery:{alarms:[…], job:bool, exact:bool}`：服务停着的时候用
+  `FLAG_NO_CREATE` 问系统「这张网还排着吗」，`alarms` 为空就是现在一张闹钟网都没有。
+- `onDestroy` 里多一手：如果这次销毁**不是**页面/用户要的（`mStopping` 为假）而 `enabled` 还开着，
+  就补齐网并重新 `startForeground` 把前台身份抢回来——还挂着前台服务，普通 kill 就杀不掉进程。
+
+### 怎么验（按破坏力从轻到重）
+
+1. 开着自动打点，从最近任务划掉壳 → 等 1 分钟再亮屏：轨迹应当继续长，账本里出现
+   `taskRemoved` →（30 秒后）`recover{why:"task-removed",stage:"service"}` → `start{why:"task-removed"}`。
+2. 设置里「强行停止」（= force-stop，闹钟任务一起清） → 再重启手机：开机后**不用打开壳**，
+   几秒内应出现 `recover{why:"boot"}` → `start{why:"boot"}`。这一步同时验掉「清网之后还剩广播」这条链。
+3. `adb shell dumpsys alarm | grep geckoview_example` 看 `sweep` 那张网的下一次到点；
+   `adb shell dumpsys jobscheduler | grep -A3 geckoview_example` 看 15 分钟任务在不在（等价于页面的 `recovery`）。
+4. 关掉自动打点再重启：账本里**不该**有任何 `recover`/`start`——撤网必须真的撤干净。
+
+### 还没底的
+
+- 划掉任务在用户那台机器上到底等不等于 force-stop（等的话遗言闹钟也会被清，只剩广播）。
+- 厂商「自启动」开关没放行时，`SCREEN_ON` / `USER_PRESENT` 是否投得进来；这决定第 5 行那张网能不能救回 force-stop。
+- `sweep` 是 `setRepeating`（免权限但不准点），Doze 里可能拖到十几分钟；有 `SCHEDULE_EXACT_ALARM`
+  时才有准点那条，用户可以在「特殊应用权限 → 闹钟和提醒」里单独关掉它，所以两条都得留着。

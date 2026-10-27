@@ -28,6 +28,12 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <!-- 「忽略电池优化」直连弹窗；国产 ROM 的启动管理仍需用户手动放行 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <!-- 被杀后自启：开机/亮屏/解锁/覆盖安装四类广播由系统投递，进程不在也要能敲门 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- 精确兜底闹钟（setExactAndAllowWhileIdle）需要它；权限被收回时代码自动退回
+         setRepeating（不准点、免权限）。USE_EXACT_ALARM 是给闹钟/日历类应用的特权权限，
+         本应用不属于那一类，所以只声明这条普通权限，运行时再查 canScheduleExactAlarms()。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- WebView 里 getUserMedia 录音：部分定制 ROM 缺这条会 AudioRecord 起不来
          （表现为 NotReadableError · Could not start audio source）。普通权限，不弹框 -->
@@ -84,6 +90,29 @@
             android:name=".jsbridge.LocationTrackingService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <!-- 被杀后自启（一）：系统广播。必须静态注册——运行时注册的接收器跟着进程一起死，
+             正好是「杀完就再也起不来」的那个坑。亮屏/解锁只能在清单里注册，这是系统规定。 -->
+        <receiver
+            android:name=".jsbridge.RecoveryReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <!-- 部分厂商 ROM 的老开机广播，认到的机型上没有也只是不触发 -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="android.intent.action.SCREEN_ON"/>
+                <action android:name="android.intent.action.USER_PRESENT"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
+
+        <!-- 被杀后自启（二）：15 分钟周期任务，setPersisted(true) 让它跨过整机重启。
+             exported 必须 false，并且要 BIND_JOB_SERVICE 权限，否则系统不予调度。 -->
+        <service
+            android:name=".jsbridge.RecoveryJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE"/>
     </application>
 
 </manifest>
