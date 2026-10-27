@@ -57,14 +57,16 @@ public class WebViewActivity extends AppCompatActivity {
   private static final String LOGTAG = "WebViewActivity";
 
   /**
-   * 本分支（feat/location-tune · 定位磨合）固定加载的测试页：网页端的
-   * 「定位磨合台」。它把网页端定位功能精简搬了一份，专门用来磨后台续记。
-   * 页面暂不并进网页仓库 main，因此手工放在 gh-pages 的 assets/ 下——每次
-   * 部署都会保留 assets/，地址长期稳定；磨合结束、页面并进 main 后，
-   * 这里再改回根路径 /DatingRecord/location-lab/。
+   * 正式包加载的在线网页（站点根路径）。
+   *
+   * 「定位磨合台」（网页仓库 `public/location-lab/`，现已并进网页 main）是磨后台续记
+   * 用的测试页，不进正式默认值：要测它就切回 `feat/location-tune` 打包，或临时把下面
+   * 这行改成 <https://totooicu.github.io/DatingRecord/location-lab/>（同一 host，
+   * `ALLOWED_HOST` 不会拦）。磨合台依赖的 `location.setDiag / journal / clearJournal`
+   * 三个动作本包已带，换地址不影响。
    */
   public static final String DEFAULT_URL =
-      "https://totooicu.github.io/DatingRecord/assets/location-lab/";
+      "https://totooicu.github.io/DatingRecord/";
 
   /** Only this host may be loaded; any other link is blocked (no external nav). */
   public static final String ALLOWED_HOST = "totooicu.github.io";

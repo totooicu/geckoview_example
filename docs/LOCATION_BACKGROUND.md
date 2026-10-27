@@ -1,6 +1,7 @@
 # 后台续记：壳在后台/熄屏继续收集定位
 
-> 分支 `feat/location-tune`（定位磨合）的探索记录。
+> 探索记录起自分支 `feat/location-tune`（定位磨合），现已并入 `main`：
+> 后台续记这套能力在正式线上，磨合台只是它的测试面。
 > 结论先写前面，实现对照在中间，测试步骤和已知边界在最后。
 
 ## 一、要解决的问题
@@ -10,9 +11,10 @@ Chromium 会把页面的 JS 定时器冻住，打点就断了；熄屏更彻底�
 系统降级调度。所以「连续定位」不能靠页面，必须由原生侧承担。
 
 本分支把网页端定位功能搬到一个精简的在线测试页（定位磨合台，网页仓库
-`public/location-lab/`），壳固定加载它，专门磨「后台还记不记得」。页面暂不并进
-网页 main，直接挂在 gh-pages 的 `assets/` 下（部署只清根目录、保留 `assets/`），
-线上地址：<https://totooicu.github.io/DatingRecord/assets/location-lab/>。
+`public/location-lab/`）上，专门磨「后台还记不记得」。磨合期间壳把 `DEFAULT_URL`
+指到它；页面现已并进网页 main，站点根路径即可访问
+（<https://totooicu.github.io/DatingRecord/location-lab/>），早先手工放在 gh-pages
+`assets/location-lab/` 的那份仍在（部署保留 `assets/`），已装的旧测试包继续可用。
 
 ## 二、结论：让后台续记成立的四件事（缺一件都会断）
 
@@ -44,8 +46,8 @@ Chromium 会把页面的 JS 定时器冻住，打点就断了；熄屏更彻底�
 | --- | --- |
 | `AndroidManifest.xml` | `ACCESS_BACKGROUND_LOCATION`、`FOREGROUND_SERVICE_LOCATION`、`WAKE_LOCK`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`；声明 `LocationTrackingService`（`foregroundServiceType="location"`） |
 | `LocationTrackingService` | 前台服务 + 唤醒锁；`START_STICKY` + 只认 enabled 的恢复语义；`onTaskRemoved` 不自杀；JSONL 落盘；通知栏活体证据；诊断字段 |
-| `LocationBridge` | `location.*` 全部动作：`setConfig / start / stop / status / getHistory / clearHistory`，新增 `requestPermissions`、`batteryOptimization`、`requestBatteryExemption`；事件 `location.point`、`location.state` |
-| `WebViewActivity` | `DEFAULT_URL` 指向定位磨合台；`onPageFinished` 后 `pullLocationConfig()` 主动读页面的 `dr.autoLocation`（页面一次桥都没调也不怕） |
+| `LocationBridge` | `location.*` 全部动作：`setConfig / start / stop / status / getHistory / clearHistory`，新增 `requestPermissions`、`batteryOptimization`、`requestBatteryExemption`；取证组 `setDiag / journal / clearJournal`；事件 `location.point`、`location.state` |
+| `WebViewActivity` | 正式包 `DEFAULT_URL` 仍是站点根路径（磨合期在 `feat/location-tune` 上指向定位磨合台）；`onPageFinished` 后 `pullLocationConfig()` 主动读页面的 `dr.autoLocation`（页面一次桥都没调也不怕） |
 | `JsBridge` | 路由 `location.` 前缀；`PERM_LOCATION` 权限码；`location()` 访问器 |
 
 ### 采集循环
