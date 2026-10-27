@@ -255,3 +255,25 @@ tick 覆盖率 98%，每一拍都取得到点。剩下要回答的是「以后�
 - 厂商「自启动」开关没放行时，`SCREEN_ON` / `USER_PRESENT` 是否投得进来；这决定第 5 行那张网能不能救回 force-stop。
 - `sweep` 是 `setRepeating`（免权限但不准点），Doze 里可能拖到十几分钟；有 `SCHEDULE_EXACT_ALARM`
   时才有准点那条，用户可以在「特殊应用权限 → 闹钟和提醒」里单独关掉它，所以两条都得留着。
+
+## 十二、main 上的自启线（本轮标注，方便退回检查）
+
+**自启动是随 0.3.4-tune 并入 main 的，功能提交是 `6131522`**（从测试分支
+`feat/location-tune` 的 `3a4eb35` 原样搬来，`git log --grep=四张网` 就能定位）。
+这一节专为「以后要退回/核对」而写，判读内容本身在 §十一。
+
+- **main 因此多了什么**：三个新类 `RecoveryArm` / `RecoveryReceiver` / `RecoveryJobService`；
+  清单里的 `RECEIVE_BOOT_COMPLETED`、`SCHEDULE_EXACT_ALARM`、静态接收器（开机/亮屏/解锁/
+  覆盖安装）和 `BIND_JOB_SERVICE` 周期任务服务；`LocationTrackingService` 的
+  `onRecovery(why)`、`recoverExtra`、`journalStatic`、`onDestroy` 里抢回前台身份、
+  `onTaskRemoved` 里的 30 秒遗言闹钟；`location.status` 新增 `recovery` 字段；
+  版本号 `versionCode 7` / `versionName 0.3.4-tune`。
+- **main 不包含什么**：分支专属的 `DEFAULT_URL`（main 仍是站点根
+  `https://totooicu.github.io/DatingRecord/`，指向磨合台的那一条只在 `feat/location-tune` 上，
+  提交 `ef185c0`）；`gradle.properties` 里的构建机 JDK 路径同样不进 main。
+  所以从 main 打的包加载的是正式网页，测自启看的是账本里的 `recover`/`start{why}` 行。
+- **怎么退回**：`git revert 6131522` 一条就干净——三个新类、清单两条权限与两个组件、
+  状态字段、§十一 全在同一条提交里，退完 main 回到「只有前台服务 + 60 秒心跳」的状态。
+  若连本节和时间戳一起退，再 `git revert HEAD`（本节的这条标注提交）。
+- **怎么认出线上是哪一份**：页面版本条读 `getEnv()` 的 commit 与 builtAt；
+  或者 `aapt dump badging` 里看有没有 `RECEIVE_BOOT_COMPLETED`——有就是带自启的那份。
