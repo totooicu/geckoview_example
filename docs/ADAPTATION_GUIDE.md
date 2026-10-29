@@ -254,6 +254,56 @@ window.addEventListener('message', (e) => {
 - **定位**：网页 `navigator.geolocation.getCurrentPosition()` → 弹定位授权
 - **文件选择**：网页 `<input type="file">` → App 调起系统文件选择器（含多选、MIME 过滤）
 
+### 4.5 网络代理 `NetBridge` + `NetHttp`（`net.*`，2026-10-29 新增）
+
+**为什么要有它**：坚果云的 WebDAV 不返回跨域头，浏览器里 `fetch` 一定被拦
+（`PROPFIND`/`MKCOL` 这些非标准动词连预检都过不去）。壳在系统网络栈上发请求，
+不受 CORS 约束，于是把「发请求」这一件事交给原生，同步策略仍全部留在网页里。
+
+| action | 参数 | 返回 | 说明 |
+|---|---|---|---|
+| `net.capabilities` | — | `{methods, maxRequestBytes, maxResponseBytes, maxTimeoutMs, version}` | 探测用。页面想知道壳有没有这能力，就发一次看有没有人回，不读环境猜 |
+| `net.request` | `{method, url, headers?, bodyBase64?, timeoutMs?, maxResponseBytes?}` | `{status, statusText, headers, bodyBase64, bodyLength}` | 发一次 HTTP 请求，响应**原样交回**，壳不判断成败 |
+
+`net.request` 的约定：
+
+- **方法白名单**：`GET HEAD OPTIONS PUT DELETE TRACE CONNECT PATCH POST`
+  + WebDAV 的 `PROPFIND PROPPATCH MKCOL COPY MOVE LOCK UNLOCK`。其它一律拒。
+- **地址只允许 http/https**；`file://`、`content://` 直接拒绝（否则网页就能读到 App 私有目录）；
+  URL 里带 `user:pass@` 也拒绝——认证只走 `Authorization` 头。
+- `Host` / `Content-Length` / `Connection` / `Transfer-Encoding` 由壳接管，页面传了会被忽略。
+- 请求体与响应体都用 **base64（无换行）**：二进制分片才能穿过 JSON。
+- 上限：请求体 12MB、响应体 32MB、单次等待 120s。超过响应上限是**报错**，不是截断。
+- **不自动跟随 3xx**：WebDAV 的 PUT/MKCOL 被重定向后语义就变了，
+  3xx 连同 `Location` 头原样交回页面决定。
+- 出错时 `ok:false`，`error` 已经是给用户看的话（超时 / 加密连接失败 / 地址不合法…），
+  页面直接显示即可，不用再翻译。
+- 协议版本 `proto` **不升**：只增动作、不删不改既有参数语义。
+
+调用示例（网页侧封装见 DatingRecord `src/core/sync/webdav.ts`）：
+
+```js
+const r = await bridge('net.request', {
+  method: 'PROPFIND',
+  url: 'https://dav.jianguoyun.com/dav/DatingRecord',
+  headers: { Authorization: 'Basic …', Depth: '1', 'Content-Type': 'application/xml;charset=utf-8' },
+  bodyBase64: b64('<?xml version="1.0"?><d:propfind xmlns:d="DAV:">…</d:propfind>'),
+  timeoutMs: 20000,
+});
+// r.status = 207，r.bodyBase64 解出来是 multistatus XML
+```
+
+原生实现分两层，改动时别混：`NetHttp.java` 是纯 `java.*` 的 HTTP/1.1 客户端
+（自己写请求行、自己收响应，因为 Android 的 `HttpURLConnection` 发不出
+`PROPFIND`），可以在桌面上单独测试：
+
+```bash
+cd tools/net-http-test && node server.mjs &        # 假坚果云
+./run.sh --live                                    # 25 项断言 + 真实坚果云探活
+```
+
+`NetBridge.java` 只做 base64、线程池与应答格式，必须在桌面测试通过后才动它。
+
 ---
 
 ## 5. 权限处理（重点）
@@ -320,6 +370,8 @@ window.addEventListener('message', (e) => {
 | `jsbridge/JsBridge.java` | 桥入口：`invoke(id,action,params)` 路由 + `respond/emit` 回推 + `getEnv()` |
 | `jsbridge/BleManager.java` | 蓝牙 Central/Peripheral |
 | `jsbridge/FileBridge.java` | 文件读写 |
+| `jsbridge/NetBridge.java` | 网络代理 `net.*`：参数校验、base64、线程池、应答格式 |
+| `jsbridge/NetHttp.java` | 纯 `java.*` 的 HTTP/1.1 客户端（任意动词、自己拼请求行），桌面可直接测 |
 | `jsbridge/ScreenCaptureManager.java` + `ScreenCaptureService.java` | 录屏 |
 | `app/src/main/AndroidManifest.xml` | 权限 + Activity/Service 声明 |
 

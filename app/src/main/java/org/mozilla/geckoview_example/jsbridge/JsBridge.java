@@ -57,6 +57,7 @@ public class JsBridge {
   private FileBridge mFiles;
   private ScreenCaptureManager mScreen;
   private LocationBridge mLocation;
+  private NetBridge mNet;
 
   public JsBridge(Activity activity) {
     mActivity = new WeakReference<>(activity);
@@ -64,6 +65,7 @@ public class JsBridge {
     mFiles = new FileBridge(activity, this);
     mScreen = new ScreenCaptureManager(activity, this);
     mLocation = new LocationBridge(activity, this);
+    mNet = new NetBridge();
   }
 
   /** Called by the hosting activity once the WebView exists. */
@@ -153,6 +155,8 @@ public class JsBridge {
       mScreen.handle(id, action, params, this);
     } else if (action.startsWith("location.")) {
       mLocation.handle(id, action, params, this);
+    } else if (action.startsWith("net.")) {
+      mNet.handle(id, action, params, this);
     } else if (action.startsWith("ui.")) {
       handleUi(id, action, params);
     } else {
@@ -349,6 +353,10 @@ public class JsBridge {
     return mLocation;
   }
 
+  public NetBridge net() {
+    return mNet;
+  }
+
   public Activity activity() {
     return mActivity.get();
   }
@@ -357,6 +365,9 @@ public class JsBridge {
   public void onDestroy() {
     if (mBle != null) {
       mBle.onDestroy();
+    }
+    if (mNet != null) {
+      mNet.onDestroy();
     }
     mWebView = null;
   }

@@ -36,6 +36,7 @@
   }
   .ok { color: #16a34a; }
   .err { color: #dc2626; }
+  .hint { font-size: 12px; color: #6b7280; margin: 6px 0 0; }
   #meter-wrap { height: 10px; background: #e5e7eb; border-radius: 5px; overflow: hidden; width: 100%; }
   #meter { height: 100%; width: 0%; background: #16a34a; transition: width .1s; }
   .dev { padding: 8px; border: 1px solid #e5e7eb; border-radius: 8px; margin: 6px 0; display: flex; align-items: center; gap: 8px; }
@@ -158,6 +159,24 @@
     </div>
     <div id="rec-status" class="status">未测试</div>
     <img id="thumb-img" alt="录屏预览" />
+  </div>
+
+  <div class="card">
+    <h2>网络代理 · WebDAV（net.*）</h2>
+    <div class="row">
+      <input id="net-url" value="https://dav.jianguoyun.com/dav/" placeholder="请求地址" />
+    </div>
+    <div class="row">
+      <input id="net-user" value="" placeholder="坚果云邮箱（可空）" style="max-width:180px" />
+      <input id="net-pass" value="" placeholder="应用密码（可空）" style="max-width:150px" />
+      <button id="btn-net-caps" class="secondary">探测能力</button>
+    </div>
+    <div class="row">
+      <button id="btn-net-probe">不带凭据 PROPFIND</button>
+      <button id="btn-net-auth">带凭据 PROPFIND</button>
+    </div>
+    <div id="net-status" class="status">未测试</div>
+    <p class="hint">「不带凭据」只需网络通：坚果云应回 401，能拿到状态码就说明壳把 PROPFIND 真的发出去了（浏览器里这一步必然被 CORS 拦死）。带凭据要填邮箱 + 应用密码，成功回 207 并列出目录。</p>
   </div>
 
 <script>
@@ -564,6 +583,51 @@
     window.gvBridge.on('screen.recordingError', function (d) {
       log(recStatus, '录屏错误：' + (d && d.error), 'err');
     });
+
+    /* ---------- 网络代理 net.* ---------- */
+    var netStatus = document.getElementById('net-status');
+    var PROPFIND_BODY = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/></d:prop></d:propfind>';
+
+    function netPropfind(withAuth) {
+      var headers = { Depth: '0', 'Content-Type': 'application/xml;charset=utf-8' };
+      if (withAuth) {
+        var u = document.getElementById('net-user').value.trim();
+        var p = document.getElementById('net-pass').value.trim();
+        if (!u || !p) { log(netStatus, '先把邮箱和应用密码填上（密码要用坚果云「应用密码」）', 'err'); return; }
+        headers.Authorization = 'Basic ' + base64(u + ':' + p);
+      }
+      log(netStatus, '请求中…', '');
+      window.gvBridge.invoke('net.request', {
+        method: 'PROPFIND',
+        url: document.getElementById('net-url').value.trim(),
+        headers: headers,
+        bodyBase64: base64(PROPFIND_BODY),
+        timeoutMs: 20000
+      }).then(function (r) {
+        var xml = deb64(r.bodyBase64 || '');
+        var entries = (xml.match(/<d:response>/g) || []).length;
+        if (r.status === 207) {
+          log(netStatus, '207 多状态，列出 ' + (entries - 1) + ' 项 · 响应 ' + r.bodyLength + ' 字节：这条路通了 ✓', 'ok');
+        } else if (r.status === 401 || r.status === 403) {
+          log(netStatus, r.status + '（' + (r.statusText || '') + '）：请求发到了坚果云并被拒绝——'
+            + (withAuth ? '凭据不对，检查应用密码' : '未带凭据被拒属正常，说明桥能发 PROPFIND'), withAuth ? 'err' : 'ok');
+        } else {
+          log(netStatus, '状态 ' + r.status + ' ' + (r.statusText || '') + ' · 响应 ' + r.bodyLength + ' 字节', '');
+        }
+      }).catch(function (e) { log(netStatus, '失败：' + e.message, 'err'); });
+    }
+
+    document.getElementById('btn-net-caps').addEventListener('click', function () {
+      log(netStatus, '探测中…', '');
+      window.gvBridge.invoke('net.capabilities', {}).then(function (r) {
+        log(netStatus, '壳支持 ' + Object.keys(r.methods || {}).length + ' 个动词 · 请求体上限 '
+          + (r.maxRequestBytes / 1024 / 1024) + 'MB · 响应上限 ' + (r.maxResponseBytes / 1024 / 1024)
+          + 'MB · 壳版本 ' + r.version, 'ok');
+      }).catch(function (e) { log(netStatus, '这版壳没有 net.*：' + e.message, 'err'); });
+    });
+    document.getElementById('btn-net-probe').addEventListener('click', function () { netPropfind(false); });
+    document.getElementById('btn-net-auth').addEventListener('click', function () { netPropfind(true); });
   })();
 </script>
 </body>
