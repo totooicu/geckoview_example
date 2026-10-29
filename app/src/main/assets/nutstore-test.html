@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>坚果云 · 原生网络代理测试</title>
+<style>
+  /* 手机优先：一屏一步，日志跟着滚 */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px 12px 96px;
+    font: 15px/1.6 -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    color: #24292f; background: #f7f8fa;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 8px; }
+  .sub { color: #6b7280; font-size: 13px; margin: 0 0 14px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+  label { display: block; font-size: 13px; color: #4b5563; margin: 8px 0 3px; }
+  input {
+    width: 100%; padding: 9px 10px; font-size: 15px;
+    border: 1px solid #d1d5db; border-radius: 8px; background: #fff; color: inherit;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  button {
+    flex: 1 1 auto; min-width: 132px; padding: 10px 12px; font-size: 14px;
+    border: 1px solid #c7ccd4; border-radius: 9px; background: #fff; color: #24292f;
+  }
+  button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  button.warn { background: #fff7ed; border-color: #fdba74; }
+  button:disabled { opacity: .5; }
+  #summary {
+    position: sticky; top: 0; z-index: 2; margin: -12px -12px 12px; padding: 10px 14px;
+    background: #111827; color: #f9fafb; font-size: 14px;
+  }
+  #log { font-size: 13px; }
+  .line { padding: 7px 0; border-bottom: 1px dashed #eceef1; word-break: break-all; }
+  .line:last-child { border-bottom: 0; }
+  .ok { color: #15803d; }
+  .fail { color: #b91c1c; }
+  .info { color: #4b5563; }
+  .run { color: #92400e; }
+  .tag { font-weight: 600; }
+  .small { font-size: 12.5px; color: #6b7280; }
+  a { color: #2563eb; }
+  code { background: #eef1f5; padding: 1px 4px; border-radius: 4px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div id="summary">未开始 · 通过 <b>0</b> · 失败 <b>0</b></div>
+
+<h1>坚果云 · 原生网络代理测试</h1>
+<p class="sub">
+  这一页只做一件事：把 WebDAV 请求交给壳的 <code>net.*</code> 去发，然后看坚果云怎么回。
+  浏览器里同步不了坚果云（它不返回跨域头，<code>PROPFIND</code> / <code>MKCOL</code> 连预检都过不去），
+  壳跑在系统网络栈上，才是这条路能通的原因。
+</p>
+
+<div class="card">
+  <h2>壳的环境</h2>
+  <div id="env" class="small">读取中…</div>
+</div>
+
+<div class="card">
+  <h2>要测的坚果云</h2>
+  <label>服务地址（WebDAV 根）</label>
+  <input id="in-base" value="https://dav.jianguoyun.com/dav" autocomplete="off" />
+  <label>账号（坚果云注册邮箱）</label>
+  <input id="in-user" placeholder="you@example.com" autocomplete="username" />
+  <label>应用密码（不是登录密码）</label>
+  <input id="in-pass" type="password" placeholder="坚果云 → 账户信息 → 安全选项 → 添加应用密码" autocomplete="off" />
+  <label>测试目录（本页独占，不碰正式备份目录）</label>
+  <input id="in-folder" value="DatingRecord-ShellTest" autocomplete="off" />
+  <p class="small">
+    地址、账号、目录存本机 localStorage 方便下次；<b>应用密码不存</b>，刷新就要重填。
+    凭据只出现在发往上面这个地址的请求头里，本页不发往任何其它主机。
+  </p>
+  <div class="row">
+    <button id="btn-save">记住地址/账号</button>
+    <button id="btn-all" class="primary">一键跑完整套</button>
+    <button id="btn-big" class="warn">加测 2MB 大文件</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>单步</h2>
+  <div class="row">
+    <button data-step="caps">探测能力</button>
+    <button data-step="anon">不带凭据 PROPFIND</button>
+    <button data-step="auth">带凭据 PROPFIND</button>
+    <button data-step="mkcol">建目录</button>
+    <button data-step="text">文本读写</button>
+    <button data-step="bin">64KB 二进制读写</button>
+    <button data-step="list">列目录</button>
+    <button data-step="head">HEAD</button>
+    <button data-step="clean" class="warn">清理测试目录</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>日志</h2>
+  <div id="log"></div>
+</div>
+
+<div class="card small">
+  <p style="margin:0 0 6px">怎么打开这一页：</p>
+  <p style="margin:0 0 6px">① 手机上<b>长按屏幕顶部那条空白</b>，在「调试页」里选 <code>nutstore-test.html</code>；
+  ② 或 adb：<code>adb shell am start -n org.mozilla.geckoview_example/.WebViewActivity --es page nutstore-test.html</code></p>
+  <p style="margin:0"><a href="test.html">通用桥测试页</a> ·
+    <a href="https://totooicu.github.io/DatingRecord/">回线上首页</a></p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- 桥客户端（协议同 test.html：postMessage ↔ gv-bridge-response） ---------- */
+  window.gvBridge = {
+    _pending: new Map(), _seq: 0,
+    invoke: function (action, params, timeoutMs) {
+      var self = this, t = timeoutMs || 30000;
+      return new Promise(function (resolve, reject) {
+        var id = 'r' + (++self._seq);
+        self._pending.set(id, { resolve: resolve, reject: reject });
+        window.postMessage({ type: 'gv-bridge-request', id: id, action: action, params: params || {} }, '*');
+        setTimeout(function () {
+          if (self._pending.has(id)) { self._pending.delete(id); reject(new Error('等壳回应超时（' + (t / 1000) + ' 秒）')); }
+        }, t);
+      });
+    }
+  };
+  window.addEventListener('message', function (e) {
+    var m = e.data;
+    if (!m || m.type !== 'gv-bridge-response') return;
+    var p = window.gvBridge._pending.get(m.id);
+    if (!p) return;
+    window.gvBridge._pending.delete(m.id);
+    m.ok ? p.resolve(m.result || {}) : p.reject(new Error(m.error || '壳返回失败'));
+  });
+
+  /* ---------- 字节 ↔ base64：二进制不能靠 unescape/escape 那套文本转换搬 ---------- */
+  function bytesToB64(u8) {
+    var s = '', step = 8192;
+    for (var i = 0; i < u8.length; i += step) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + step));
+    }
+    return btoa(s);
+  }
+  function b64ToBytes(t) {
+    if (!t) return new Uint8Array(0);
+    var bin = atob(t.replace(/\s+/g, '')), out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function utf8(text) { return new TextEncoder().encode(text); }
+  function toText(u8) { return new TextDecoder().decode(u8); }
+
+  /* ---------- 页面小工 ---------- */
+  function $(id) { return document.getElementById(id); }
+  var logBox = $('log');
+  var ok = 0, fail = 0, running = false, done = false;
+
+  function setSummary() {
+    // 前缀要么「跑测试中」要么「跑完」，单步时为空；每条日志都会重算计数，
+    // 所以这里不能把状态串在文本里等下一次覆盖——最后一行是结论，覆盖完就再也等不到了。
+    var state = running ? '跑测试中 · ' : (done ? '跑完 · ' : '');
+    $('summary').innerHTML = state + '通过 <b>' + ok + '</b> · 失败 <b>' + fail + '</b>';
+  }
+  function line(cls, tag, text) {
+    var d = document.createElement('div');
+    d.className = 'line ' + cls;
+    d.innerHTML = '<span class="tag">' + tag + '</span> ' + text;
+    logBox.appendChild(d);
+    d.scrollIntoView({ block: 'end' });
+    return d;
+  }
+  function pass(tag, text) { ok++; setSummary(); line('ok', '✓ ' + tag, text); }
+  function bad(tag, text) { fail++; setSummary(); line('fail', '✗ ' + tag, text); }
+  function note(tag, text) { line('info', tag, text); }
+  function busy(tag, text) { return line('run', '… ' + tag, text); }
+  function kb(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(2) + ' MB';
+  }
+  function hex(u8, n) {
+    var out = [];
+    for (var i = 0; i < Math.min(n || 8, u8.length); i++) out.push(('0' + u8[i].toString(16)).slice(-2));
+    return out.join(' ');
+  }
+
+  /* ---------- 配置与 URL（和网页侧 sync/webdav.ts 同一套拼法） ---------- */
+  var LS = 'dr.shellTest.nutstore';
+  function conf() {
+    return {
+      base: $('in-base').value.trim().replace(/\/+$/, ''),
+      user: $('in-user').value.trim(),
+      pass: $('in-pass').value.trim(),
+      folder: $('in-folder').value.trim().replace(/^\/+|\/+$/g, '') || 'DatingRecord-ShellTest'
+    };
+  }
+  function urlOf(c, path) {
+    var segs = [c.folder].concat((path || '').split('/').filter(Boolean)).map(encodeURIComponent);
+    return c.base + '/' + segs.join('/');
+  }
+  function auth(c) { return 'Basic ' + bytesToB64(utf8(c.user + ':' + c.pass)); }
+  function needCreds(c, tag) {
+    if (!c.user || !c.pass) {
+      bad(tag, '要先填账号和应用密码（用坚果云「账户信息 → 安全选项 → 添加应用密码」生成的<b>应用密码</b>，不是登录密码）');
+      return false;
+    }
+    return true;
+  }
+  var PROP_BODY = '<?xml version="1.0" encoding="utf-8"?>'
+    + '<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/></d:prop></d:propfind>';
+
+  /** 一次经壳的 HTTP：返回 {status, statusText, headers, bytes, ms} */
+  function http(method, c, path, opts) {
+    opts = opts || {};
+    var headers = {};
+    if (opts.auth !== false) headers.Authorization = auth(c);
+    if (opts.headers) for (var k in opts.headers) headers[k] = opts.headers[k];
+    var timeoutMs = opts.timeoutMs || 30000;
+    var params = { method: method, url: urlOf(c, path), headers: headers, timeoutMs: timeoutMs };
+    if (opts.body != null) {
+      params.bodyBase64 = typeof opts.body === 'string' ? bytesToB64(utf8(opts.body)) : bytesToB64(opts.body);
+    }
+    var t0 = Date.now();
+    // 网页侧多等 5 秒：让壳先超时，报出来的才是壳那句人话
+    return window.gvBridge.invoke('net.request', params, timeoutMs + 5000).then(function (r) {
+      return {
+        status: Number(r.status || 0),
+        statusText: String(r.statusText || ''),
+        headers: r.headers || {},
+        bytes: b64ToBytes(String(r.bodyBase64 || '')),
+        ms: Date.now() - t0
+      };
+    });
+  }
+  function why(r) {
+    return 'HTTP ' + r.status + ' ' + r.statusText + ' · ' + kb(r.bytes.length) + ' · ' + r.ms + 'ms';
+  }
+
+  /* ---------- 步骤 ---------- */
+  var steps = {};
+
+  steps.caps = function () {
+    var el = busy('探测能力', '问壳支持哪些动词…');
+    return window.gvBridge.invoke('net.capabilities', {}, 8000).then(function (r) {
+      el.remove();
+      var ms = Object.keys(r.methods || {}).length;
+      var canProp = r.methods && r.methods.PROPFIND === true;
+      var canMk = r.methods && r.methods.MKCOL === true;
+      if (canProp && canMk) {
+        pass('探测能力', '壳 v' + r.version + ' · ' + ms + ' 个动词，含 PROPFIND / MKCOL · 请求上限 '
+          + kb(r.maxRequestBytes) + ' · 响应上限 ' + kb(r.maxResponseBytes) + ' · 超时上限 ' + (r.maxTimeoutMs / 1000) + 's');
+        return true;
+      }
+      bad('探测能力', '壳回包了但不支持 WebDAV 动词：' + JSON.stringify(r.methods));
+      return false;
+    }).catch(function (e) {
+      el.remove();
+      bad('探测能力', '这版壳没有 net.*：' + e.message + '（要装带网络代理的壳）');
+      return false;
+    });
+  };
+
+  steps.anon = function () {
+    var c = conf();
+    var el = busy('不带凭据 PROPFIND', '向 ' + c.base + ' 发一条不认证的 PROPFIND…');
+    return http('PROPFIND', c, '', {
+      auth: false, body: PROP_BODY,
+      headers: { Depth: '0', 'Content-Type': 'application/xml;charset=utf-8' }
+    }).then(function (r) {
+      el.remove();
+      if (r.status === 401 || r.status === 403) {
+        pass('不带凭据 PROPFIND', why(r) + ' —— 请求真到了坚果云并被按规则拒绝：非标准动词发得出去，通道是通的');
+      } else if (r.status === 207) {
+        note('不带凭据 PROPFIND', '居然返回 207（这个地址允许匿名读？）：' + why(r));
+      } else {
+        bad('不带凭据 PROPFIND', '意外状态：' + why(r));
+      }
+      return true;
+    }).catch(function (e) {
+      el.remove();
+      bad('不带凭据 PROPFIND', '发不出去：' + e.message);
+      return false;
+    });
+  };
+
+  steps.auth = function () {
+    var c = conf();
+    if (!needCreds(c, '带凭据 PROPFIND')) return Promise.resolve(false);
+    var el = busy('带凭据 PROPFIND', '列根目录（Depth:1）…');
+    return http('PROPFIND', c, '', {
+      body: PROP_BODY, headers: { Depth: '1', 'Content-Type': 'application/xml;charset=utf-8' }
+    }).then(function (r) {
+      el.remove();
+      var items = parseMultistatus(toText(r.bytes));
+      if (r.status === 207) {
+        pass('带凭据 PROPFIND', why(r) + ' · 解析出 ' + items.length + ' 项（含目录自身）· 应用密码是对的');
+        return true;
+      }
+      if (r.status === 401 || r.status === 403) {
+        bad('带凭据 PROPFIND', why(r) + ' —— 应用密码不对，或被坚果云限流');
+        return false;
+      }
+      bad('带凭据 PROPFIND', '意外状态：' + why(r));
+      return false;
+    }).catch(function (e) { el.remove(); bad('带凭据 PROPFIND', e.message); return false; });
+  };
+
+  steps.mkcol = function () {
+    var c = conf();
+    if (!needCreds(c, '建目录')) return Promise.resolve(false);
+    // 和网页侧 engine.ensureDir 一样逐级建：先根目录再 probe。已存在时坚果云回 405，
+    // 按成功处理；不先建 probe 就往里 PUT，真坚果云会回 409，这一步就是在验这件事。
+    var targets = ['', 'probe'];
+    var el = busy('建目录', 'MKCOL ' + c.folder + ' 与 ' + c.folder + '/probe …');
+    var seen = [];
+    return targets.reduce(function (chain, p) {
+      return chain.then(function () {
+        return http('MKCOL', c, p, {}).then(function (r) {
+          seen.push((p || '根') + '→' + r.status);
+          if (r.status === 201 || r.status === 405) return;
+          throw new Error((p || '根') + ' 建目录意外状态 HTTP ' + r.status + ' ' + r.statusText);
+        });
+      });
+    }, Promise.resolve()).then(function () {
+      el.remove();
+      pass('建目录', seen.join(' · ') + '（201 新建 / 405 已存在，都算通）');
+      return true;
+    }).catch(function (e) { el.remove(); bad('建目录', e.message); return false; });
+  };
+
+  var TEXT_PATH = 'probe/hello-中文 测试.json';
+
+  steps.text = function () {
+    var c = conf();
+    if (!needCreds(c, '文本读写')) return Promise.resolve(false);
+    var payload = JSON.stringify({ at: new Date().toISOString(), 文本: '一段中文 · emoji ✅', n: 42 }, null, 2);
+    var el = busy('文本读写', 'PUT ' + TEXT_PATH + '（' + kb(utf8(payload).length) + '）…');
+    var putStatus = 0;
+    return http('PUT', c, TEXT_PATH, {
+      body: payload, headers: { 'Content-Type': 'application/json;charset=utf-8' }
+    }).then(function (r) {
+      if (r.status !== 201 && r.status !== 204) { el.remove(); bad('文本读写', 'PUT 意外状态：' + why(r)); return false; }
+      putStatus = r.status;
+      el.innerHTML = '<span class="tag">… 文本读写</span> 写入 ' + r.status + ' 了，读回来比对…';
+      return http('GET', c, TEXT_PATH, {});
+    }).then(function (g) {
+      el.remove();
+      if (g.status !== 200) { bad('文本读写', 'GET 意外状态：' + why(g)); return false; }
+      var back = toText(g.bytes);
+      if (back === payload) {
+        pass('文本读写', '写入 ' + putStatus + ' · 读回 200 · ' + why(g) + ' · 逐字符一致（含中文与 emoji）');
+        return true;
+      }
+      bad('文本读写', '读回内容不一致：期望 ' + payload.length + ' 字符，实际 ' + back.length + ' 字符');
+      return false;
+    }).catch(function (e) { el.remove(); bad('文本读写', e.message); return false; });
+  };
+
+  /** 造一段确定的伪随机字节（每次一样，方便比对，也覆盖全字节域） */
+  function seedBytes(n) {
+    var u8 = new Uint8Array(n), x = 123456789;
+    for (var i = 0; i < n; i++) {
+      x = (x * 1103515245 + 12345) & 0x7fffffff;
+      u8[i] = (x >> 7) & 0xff;
+    }
+    return u8;
+  }
+
+  function binaryRoundtrip(label, size, timeoutMs) {
+    var c = conf();
+    if (!needCreds(c, label)) return Promise.resolve(false);
+    var path = 'probe/blob-' + size + '.bin';
+    var src = seedBytes(size);
+    var el = busy(label, 'PUT ' + path + '（' + kb(size) + '，伪随机全字节域）…');
+    var putStatus = 0;
+    return http('PUT', c, path, {
+      body: src, headers: { 'Content-Type': 'application/octet-stream' }, timeoutMs: timeoutMs
+    }).then(function (r) {
+      if (r.status !== 201 && r.status !== 204) { el.remove(); bad(label, 'PUT 意外状态：' + why(r)); return false; }
+      putStatus = r.status;
+      el.innerHTML = '<span class="tag">… ' + label + '</span> 写入 ' + r.status + ' 了，读回来逐字节比对…';
+      return http('GET', c, path, { timeoutMs: timeoutMs });
+    }).then(function (g) {
+      el.remove();
+      if (g.status !== 200) { bad(label, 'GET 意外状态：' + why(g)); return false; }
+      if (g.bytes.length !== src.length) {
+        bad(label, '长度不对：发出 ' + src.length + ' 字节，收到 ' + g.bytes.length + ' 字节（' + why(g) + '）');
+        return false;
+      }
+      var diff = -1;
+      for (var i = 0; i < src.length; i++) if (src[i] !== g.bytes[i]) { diff = i; break; }
+      if (diff >= 0) {
+        bad(label, '第 ' + diff + ' 字节起不一致（发 ' + hex(src.subarray(diff, diff + 4), 4)
+          + ' / 收 ' + hex(g.bytes.subarray(diff, diff + 4), 4) + '）——base64 或偏移有问题');
+        return false;
+      }
+      pass(label, '写入 ' + putStatus + ' · 读出逐字节相同 · 头 8 字节 ' + hex(g.bytes, 8) + ' · ' + why(g));
+      return true;
+    }).catch(function (e) { el.remove(); bad(label, e.message); return false; });
+  }
+
+  steps.bin = function () { return binaryRoundtrip('64KB 二进制读写', 65536, 30000); };
+  steps.big = function () { return binaryRoundtrip('2MB 大文件读写', 2 * 1024 * 1024, 90000); };
+
+  function parseMultistatus(xml) {
+    var out = [];
+    var blocks = xml.match(/<d:response>[\s\S]*?<\/d:response>/g) || [];
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i];
+      var href = (/<d:href>([^<]*)<\/d:href>/.exec(b) || [])[1] || '';
+      var segs = href.replace(/\/+$/, '').split('/');
+      var name = '';
+      try { name = decodeURIComponent(segs[segs.length - 1] || ''); } catch (e) { name = segs[segs.length - 1] || ''; }
+      out.push({
+        name: name,
+        isDir: /<d:collection\s*\/>/.test(b),
+        size: Number((/<d:getcontentlength>(\d+)</.exec(b) || [])[1] || 0)
+      });
+    }
+    return out;
+  }
+
+  steps.list = function () {
+    var c = conf();
+    if (!needCreds(c, '列目录')) return Promise.resolve(false);
+    var el = busy('列目录', 'PROPFIND ' + c.folder + '（Depth:1）…');
+    return http('PROPFIND', c, '', {
+      body: PROP_BODY, headers: { Depth: '1', 'Content-Type': 'application/xml;charset=utf-8' }
+    }).then(function (r) {
+      el.remove();
+      if (r.status !== 207) { bad('列目录', '意外状态：' + why(r)); return false; }
+      var items = parseMultistatus(toText(r.bytes));
+      var kids = items.filter(function (e) { return e.name && e.name !== c.folder; });
+      if (!kids.length) { bad('列目录', '207 里解析不出任何条目，multistatus 结构可能和预期不一样：' + why(r)); return false; }
+      var text = kids.map(function (e) { return e.name + (e.isDir ? '/' : '（' + kb(e.size) + '）'); }).join('、');
+      pass('列目录', why(r) + ' · ' + kids.length + ' 项：' + (text.length > 240 ? text.slice(0, 240) + '…' : text));
+      return true;
+    }).catch(function (e) { el.remove(); bad('列目录', e.message); return false; });
+  };
+
+  steps.head = function () {
+    var c = conf();
+    if (!needCreds(c, 'HEAD')) return Promise.resolve(false);
+    var el = busy('HEAD', '对这个文本文件发 HEAD（应当只有头、没有体）…');
+    return http('HEAD', c, TEXT_PATH, {}).then(function (r) {
+      el.remove();
+      var cl = r.headers['content-length'] !== undefined ? Number(r.headers['content-length']) : null;
+      if (r.status === 200 && r.bytes.length === 0) {
+        pass('HEAD', 'HTTP 200 · 响应体 0 字节（没被 Content-Length: ' + (cl === null ? '?' : cl) + ' 骗着去读体）· ' + r.ms + 'ms');
+        return true;
+      }
+      bad('HEAD', '状态 ' + r.status + ' · 响应体 ' + r.bytes.length + ' 字节，不符合 HEAD 语义');
+      return false;
+    }).catch(function (e) { el.remove(); bad('HEAD', e.message); return false; });
+  };
+
+  steps.clean = function () {
+    var c = conf();
+    if (!needCreds(c, '清理')) return Promise.resolve(false);
+    var targets = ['probe/blob-65536.bin', 'probe/blob-2097152.bin', TEXT_PATH, 'probe'];
+    var el = busy('清理', 'DELETE 测试文件与 probe 目录…');
+    var done = [];
+    return targets.reduce(function (chain, p) {
+      return chain.then(function () {
+        return http('DELETE', c, p, {}).then(function (r) {
+          done.push(p.split('/').pop() + '→' + r.status);
+        }).catch(function (e) { done.push(p.split('/').pop() + '→err'); note('清理', p + '：' + e.message); });
+      });
+    }, Promise.resolve()).then(function () {
+      el.remove();
+      pass('清理', '已发出删除：' + done.join(' · ') + '（404 表示本来就没有，也算干净）');
+      return true;
+    });
+  };
+
+  var ORDER = ['caps', 'anon', 'auth', 'mkcol', 'text', 'bin', 'list', 'head', 'clean'];
+  var ORDER_BIG = ['caps', 'anon', 'auth', 'mkcol', 'text', 'bin', 'big', 'list', 'head', 'clean'];
+
+  function runAll(withBig) {
+    if (running) return;
+    running = true; done = false;
+    ok = 0; fail = 0; setSummary();
+    logBox.innerHTML = '';
+    var order = withBig ? ORDER_BIG : ORDER;
+    var c = conf();
+    note('说明', '目标：' + c.base + ' · 目录：' + c.folder + (withBig ? ' · 含 2MB 大文件' : ''));
+    var chain = Promise.resolve();
+    var aborted = false;
+    order.forEach(function (key) {
+      chain = chain.then(function () {
+        if (aborted) return;
+        return steps[key]().then(function (r) {
+          // 探测不通 / 凭据不对：后面每一步都只会重复报同一个原因，直接停
+          if (r === false && (key === 'caps' || key === 'auth')) {
+            aborted = true;
+            note('中止', '这一步不通，后面的步骤不跑了（都是同一个原因）');
+          }
+        });
+      });
+    });
+    chain.then(function () {
+      running = false; done = true; setSummary();
+      if (fail === 0) {
+        pass('结论', '壳的网络代理完整跑通坚果云 WebDAV：建目录、列目录、文本与二进制读写、HEAD、删除都对得上。');
+      } else {
+        bad('结论', '有 ' + fail + ' 步不通，看每一条原文（错误串就是壳给的那句话，没有被改写）');
+      }
+    });
+  }
+
+  /* ---------- 按钮 ---------- */
+  document.querySelectorAll('[data-step]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (running) return;
+      done = false; // 单步不带「跑完」前缀，免得看着像整套结论
+      ok = 0; fail = 0; setSummary();
+      logBox.innerHTML = '';
+      steps[b.getAttribute('data-step')]();
+    });
+  });
+  $('btn-all').addEventListener('click', function () { runAll(false); });
+  $('btn-big').addEventListener('click', function () { runAll(true); });
+  $('btn-save').addEventListener('click', function () {
+    var c = conf();
+    try {
+      localStorage.setItem(LS, JSON.stringify({ base: c.base, user: c.user, folder: c.folder }));
+      note('记住地址/账号', '已存 localStorage（不含应用密码）：' + c.base + ' · ' + c.user + ' · ' + c.folder);
+    } catch (e) { bad('记住地址/账号', '存不了：' + e.message); }
+  });
+  try {
+    var saved = JSON.parse(localStorage.getItem(LS) || '{}');
+    if (saved.base) $('in-base').value = saved.base;
+    if (saved.user) $('in-user').value = saved.user;
+    if (saved.folder) $('in-folder').value = saved.folder;
+  } catch (e) {}
+
+  /* ---------- 环境行：一眼看出这版壳有没有 net.* ---------- */
+  (function () {
+    var parts = [];
+    try {
+      var env = (window.AndroidBridge && window.AndroidBridge.getEnv)
+        ? JSON.parse(window.AndroidBridge.getEnv()) : null;
+      if (env) {
+        parts.push('壳 ' + (env.app || '?') + ' v' + (env.version || '?')
+          + ' · 桥 proto ' + (env.proto === undefined ? '?' : env.proto)
+          + ' · 构建 ' + (env.builtAt || '?') + ' · 提交 ' + (env.commit || '?'));
+      }
+    } catch (e) { parts.push('读 getEnv 失败：' + e.message); }
+    var m = /DatingRecord\/[\d.]+/.exec(navigator.userAgent || '');
+    parts.push('UA 标记 ' + (m ? m[0] : '（没有 DatingRecord/ 标记）')
+      + ' · 页面来源 ' + location.protocol + '//' + (location.host || 'android_asset'));
+    $('env').innerHTML = parts.join('<br />');
+    if (!window.AndroidBridge) {
+      bad('环境', '这个页面里没有 <code>window.AndroidBridge</code>：不在壳里打开，桥是空的，测不了。请用壳打开这一页（长按顶部空白 → 调试页）。');
+      document.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+    }
+  })();
+})();
+</script>
+</body>
+</html>

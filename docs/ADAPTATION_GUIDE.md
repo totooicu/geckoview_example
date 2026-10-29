@@ -304,6 +304,34 @@ cd tools/net-http-test && node server.mjs &        # 假坚果云
 
 `NetBridge.java` 只做 base64、线程池与应答格式，必须在桌面测试通过后才动它。
 
+### 4.6 壳自带的调试页（验 `net.*` 这条链路的现场工具）
+
+APK 里带了两页本地资源，浏览器永远打不开它们（`file:///android_asset/…`），
+所以入口做在壳里，两条：
+
+1. **手机上**：长按屏幕最顶部那条空白（状态栏下面 42dp 的间距），弹出「调试页」选择器；
+2. **adb**：`adb shell am start -n org.mozilla.geckoview_example/.WebViewActivity --es page nutstore-test.html`
+   （Activity 是 `singleTop`，所以壳已开着也能用这条切页）。
+
+| 文件 | 干什么 | 配套回归 |
+|---|---|---|
+| `assets/test.html` | 通用桥测试页：内核、蓝牙、文件、录屏，末尾有 `net.*` 一张卡（探测 / 两条 PROPFIND） | — |
+| `assets/nutstore-test.html` | 坚果云专项：探测 → 不带凭据 401 → 带凭据 207 → 建目录 → 中文文本读写 → 64KB 二进制逐字节 → 列目录 → HEAD → 删除，另有「加测 2MB 大文件」 | `tools/nutstore-page-test/run.mjs`（桌面假壳跑同一份页面） |
+
+**入口是白名单，不是开关。** `WebViewActivity.DEBUG_PAGES` 只列 APK 里这两个文件名：
+intent 传的 `page` 必须精确命中，`shouldOverrideUrlLoading` 也只放行
+`file:///android_asset/` + 白名单文件名，其余一律还是被 `ALLOWED_HOST` 那条域名锁挡掉。
+放任意路径或任意 URL 就等于给网页开了读 App 私有目录的门，这条路不走；
+`setAllowFileAccess(false)` 也不用为调试页松开——`android_asset` 本来就不受它影响。
+
+专项页的设计约束（改动前先看一眼，这些都是断言盯着的）：
+
+- 它**只用桥**：页面自己一行 fetch 都不发（`tools/nutstore-page-test/run.mjs` 就是数这个）。
+  探测一次也不重复——每步直接发 `net.request`，不再问 `net.capabilities`。
+- 应用密码只留在输入框与请求头里，`localStorage` 只存地址/账号/目录，刷新后要重填。
+- 壳报的错误原样显示，不改写：错在网络上传时却提示用户「去配反向代理」是最坏的提示。
+- 页面里那句「怎么打开这一页」是给用户看的，别删。
+
 ---
 
 ## 5. 权限处理（重点）

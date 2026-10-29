@@ -62,6 +62,20 @@ public class WebViewActivity extends AppCompatActivity {
   /** Only this host may be loaded; any other link is blocked (no external nav). */
   public static final String ALLOWED_HOST = "totooicu.github.io";
 
+  /**
+   * 调试页入口：`adb shell am start -n org.mozilla.geckoview_example/.WebViewActivity
+   * --es page nutstore-test.html`。
+   *
+   * <p>只认下面这张白名单里的文件名——它们都是打进 APK 的 asset，不接受任意路径、
+   * 不接受 URL、不接受外部内容。域名锁管的是「网上能加载谁」，这条管的是「壳自己带了几页」，
+   * 两回事，但同样不许放宽成任意 file://。</p>
+   */
+  public static final String EXTRA_PAGE = "page";
+
+  private static final String[] DEBUG_PAGES = {"test.html", "nutstore-test.html"};
+
+  private static final String ASSET_PREFIX = "file:///android_asset/";
+
   /** Pending WebRTC PermissionRequest awaiting a runtime permission grant. */
   private static final Map<Integer, PermissionRequest> sPendingMediaPerms = new HashMap<>();
   private static final Map<Integer, GeolocationPermissions.Callback> sPendingGeoPerms =
@@ -170,6 +184,9 @@ public class WebViewActivity extends AppCompatActivity {
             if (host != null && ALLOWED_HOST.equals(host)) {
               return false; // allow in-site navigation
             }
+            if (isDebugAsset(u)) {
+              return false; // 白名单里的 asset 调试页之间可以互相跳
+            }
             Log.i(LOGTAG, "blocked external navigation to: " + (u != null ? u.toString() : "?"));
             return true; // block
           }
@@ -252,7 +269,82 @@ public class WebViewActivity extends AppCompatActivity {
               }
             });
 
-    loadUrl(DEFAULT_URL);
+    openStartPage();
+  }
+
+  @Override
+  protected void onNewIntent(Intent intent) {
+    super.onNewIntent(intent);
+    // launchMode=singleTop：壳已经在跑时再 `am start --es page …` 走这里。
+    // 没带 page 参数就什么都不做——正常拉起不该把用户当前页面刷掉。
+    setIntent(intent);
+    String page = intent != null ? intent.getStringExtra(EXTRA_PAGE) : null;
+    if (page != null) {
+      openDebugPage(page);
+    }
+  }
+
+  /** 拉起时的入口：带 --es page 就开调试页，否则照旧加载线上首页。 */
+  private void openStartPage() {
+    String page = getIntent() != null ? getIntent().getStringExtra(EXTRA_PAGE) : null;
+    if (page == null) {
+      loadUrl(DEFAULT_URL);
+      return;
+    }
+    openDebugPage(page);
+  }
+
+  private void openDebugPage(String page) {
+    if (!isDebugPageName(page)) {
+      Toast.makeText(this, "调试页不在白名单里：" + page, Toast.LENGTH_LONG).show();
+      Log.w(LOGTAG, "debug page rejected: " + page);
+      loadUrl(DEFAULT_URL);
+      return;
+    }
+    Log.i(LOGTAG, "loading debug page: " + page);
+    // file:///android_asset 不受 setAllowFileAccess(false) 影响（系统始终允许自己包里的资源），
+    // 所以开这个入口不需要把任意 file:// 访问放开。
+    mWebView.loadUrl(ASSET_PREFIX + page);
+  }
+
+  private static boolean isDebugPageName(String name) {
+    for (String p : DEBUG_PAGES) {
+      if (p.equals(name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 判定「是不是白名单里的 asset 页」：协议必须是 file，路径必须是 /android_asset/<白名单>。 */
+  private static boolean isDebugAsset(@Nullable Uri u) {
+    if (u == null || !"file".equals(u.getScheme())) {
+      return false;
+    }
+    String path = u.getPath();
+    if (path == null || !path.startsWith("/android_asset/")) {
+      return false;
+    }
+    return isDebugPageName(path.substring("/android_asset/".length()));
+  }
+
+  /** 长按顶部空白：不带 adb 也能在手机上选调试页（选「线上首页」回去）。 */
+  private void showDebugPagePicker() {
+    final String[] labels = new String[DEBUG_PAGES.length + 1];
+    labels[0] = "线上首页（DatingRecord）";
+    for (int i = 0; i < DEBUG_PAGES.length; i++) {
+      labels[i + 1] = DEBUG_PAGES[i];
+    }
+    new AlertDialog.Builder(this)
+        .setTitle("调试页")
+        .setItems(labels, (d, which) -> {
+          if (which == 0) {
+            loadUrl(DEFAULT_URL);
+          } else {
+            openDebugPage(DEBUG_PAGES[which - 1]);
+          }
+        })
+        .show();
   }
 
   /* ----------------------------------------------------------------------------
@@ -268,6 +360,14 @@ public class WebViewActivity extends AppCompatActivity {
 
     android.view.View spacer = new android.view.View(this);
     spacer.setBackgroundColor(Color.parseColor("#f3f4f6"));
+    // 长按顶部这条空白 = 调试页选择器（不带 adb 也能在手机上打开壳自带的测试页）。
+    // 它不在网页内容里，不会被页面脚本碰到，也不改变正常使用的观感。
+    spacer.setLongClickable(true);
+    spacer.setOnLongClickListener(
+        v -> {
+          showDebugPagePicker();
+          return true;
+        });
     root.addView(
         spacer,
         new LinearLayout.LayoutParams(
