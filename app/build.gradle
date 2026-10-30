@@ -28,13 +28,16 @@ android {
         applicationId "org.mozilla.geckoview_example"
         minSdk 26
         targetSdk 36
-        versionCode 6
-        versionName "1.1.1"
+        // 测试包专用号段：1001 永远高于任何真实发版号，装在手机上是覆盖安装，
+        // 不会把真实的 versionCode 序列占掉（真实发版照旧 7 → 8 → 9 往上走）。
+        versionCode 1001
+        versionName "1.2.0-test1"
         // 版本时间：写死为「提交 GitHub 的时间」（Asia/Shanghai），发版流程见
         // CLAUDE.md「版本对齐」：push 到 GitHub 后，把该提交时间更新到这里，
         // 网页经 getEnv().builtAt 查询，版本条显示「壳 1.1.1（10-25 18:10 @ …）」。
         // 当前值对应提交 83ae71d（2026-10-25 18:10:48 +08:00）。
-        buildConfigField "String", "BUILD_TIME", "\"2026-10-25 18:10\""
+        // 本行在测试分支上，填的是造包当天的时间——不是提交时间，别照抄到发版分支。
+        buildConfigField "String", "BUILD_TIME", "\"2026-10-30 09:26\""
         // git 短哈希：构建时动态取当前 HEAD（Gradle 9 移除了 Project.exec，
         // 用 ProcessBuilder；无 git 环境的机器会得到 "unknown"，需在发版机构建）。
         buildConfigField "String", "GIT_COMMIT", "\"${gitCommitShort()}\""
