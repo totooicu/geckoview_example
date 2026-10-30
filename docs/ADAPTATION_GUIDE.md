@@ -230,11 +230,41 @@ window.addEventListener('message', (e) => {
 
 | action | 说明 |
 |---|---|
+| `file.capabilities` | 探测用：`{version, binary, encodings, append, maxChunkBytes, downloads}` |
 | `file.writePrivate` / `file.appendPrivate` | 写 App 私有目录（`filesDir`，卸载即清，无需权限） |
 | `file.readPrivate` | 读私有文件（返回 base64 或文本） |
 | `file.deletePrivate` / `file.listPrivate` | 删除 / 列出私有文件 |
 | `file.writePublic` / `file.appendPublic` | 写公共目录（MediaStore，targetSdk 30+ 用系统文件） |
 | `file.readPublic` / `file.deletePublic` | 读 / 删公共文件 |
+
+**`file.writePublic` v2（2026-10-30）：二进制 + 分片续写**
+
+| 参数 | 说明 |
+|---|---|
+| `name` / `mime` | 文件名 / MIME；首片建文件时用 |
+| `encoding` | `utf8`（默认，老行为）或 `base64`（二进制） |
+| `content` | 内容；base64 时是标准编码（带不带换行都认） |
+| `uri` | 首片返回的 uri，续写时带上 |
+| `append` | `true` = 续写到同一个文件（`file.appendPublic` 等于强制 true） |
+
+返回 `{uri | path, name, location, bytes}`（`bytes` 是本片写入长度）。
+
+为什么要它：网页导出备份 / 分享包 / 下载附件一直用 `<a download>` + `blob:`，
+而 WebView / GeckoView 里**没有任何人接 blob:**（DownloadManager 也拿不到），
+在壳里点下去就是「一点反应都没有」，只有浏览器里会弹下载。
+
+网页侧的约定（`DatingRecord` 的 `core/io/save.ts`）：
+
+1. 先发一次 `file.capabilities`（1.2 秒超时，正负都缓存）；**没人回 = 浏览器**，
+   退回 `<a download>`；有人回且 `binary` 为真才走下面的分片写。
+2. 按 `maxChunkBytes`（壳给 4MB，网页实际用 2MB）切片：首片不带 `uri`，
+   后续片带首片返回的 `uri` + `append:true`。
+3. 有壳但写失败时**不回退** `<a download>`（壳里那条路本来就没反应），
+   把错误原样抛给页面显示。
+
+API 29+ 走 `MediaStore.Downloads`（`"w"` 覆盖 / `"wa"` 续写）；26–28 走公共
+`Downloads` 目录 + `WRITE_EXTERNAL_STORAGE`。provider 不认 `"wa"` 时整份读回来重写
+（上限 64MB），不留半截文件。
 
 ### 4.3 录屏 `ScreenCaptureManager` + `ScreenCaptureService`
 
