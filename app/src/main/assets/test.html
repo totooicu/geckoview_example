@@ -145,6 +145,10 @@
       <button id="btn-file-ru">读取（最后写入）</button>
       <button id="btn-file-du" class="secondary">删除（最后写入）</button>
     </div>
+    <div class="row">
+      <button id="btn-file-chunk">分片续写（应读到 AAABBB）</button>
+      <button id="btn-file-evil" class="secondary">越界位置续写（应被拒）</button>
+    </div>
     <div id="file-status-u" class="status">未测试</div>
   </div>
 
@@ -514,6 +518,42 @@
       window.gvBridge.invoke('file.deletePublic', { uri: lastPublicUri })
         .then(function (r) { log(fileU, '删除结果：' + r.deleted, ''); lastPublicUri = ''; })
         .catch(function (e) { log(fileU, e.message, 'err'); });
+    });
+    /* 分片续写：v2 的核心语义。两段都写成功后再读回来，必须是 AAABBB——
+       只看到 BBB 就是「第二片把第一片覆盖了」（append 没生效） */
+    document.getElementById('btn-file-chunk').addEventListener('click', function () {
+      var nm = 'chunk-test-' + Date.now() + '.txt';
+      var uri = '';
+      window.gvBridge.invoke('file.writePublic', { name: nm, content: 'AAA', mime: 'text/plain' })
+        .then(function (r) {
+          uri = r.uri || r.path || '';
+          lastPublicUri = uri;
+          return window.gvBridge.invoke('file.writePublic', {
+            name: nm, content: 'BBB', mime: 'text/plain', uri: uri, append: true
+          });
+        })
+        .then(function () { return window.gvBridge.invoke('file.readPublic', { uri: uri }); })
+        .then(function (r) {
+          var got = String(r.content || '');
+          if (got === 'AAABBB') log(fileU, '分片续写 ✓ 读回 ' + got + '（' + uri + '）', 'ok');
+          else log(fileU, '分片续写 ✗ 读回「' + got + '」，期望 AAABBB', 'err');
+        })
+        .catch(function (e) { log(fileU, e.message, 'err'); });
+    });
+    /* 越界位置：v2.1 的收口。页面自己拼一个本 App 私有目录里的 file: 让壳续写，
+       必须被拒；一旦成功写进去，说明「位置由壳给」这条规矩又漏了 */
+    document.getElementById('btn-file-evil').addEventListener('click', function () {
+      window.gvBridge.invoke('file.writePublic', {
+        name: 'evil.txt',
+        content: 'PWNED',
+        mime: 'text/plain',
+        uri: 'file:///data/data/org.mozilla.geckoview_example/files/location_log.jsonl',
+        append: true
+      })
+        .then(function (r) {
+          log(fileU, '越界续写 ✗ 竟然写进去了：' + (r.uri || r.path) + '（该被拒才对）', 'err');
+        })
+        .catch(function (e) { log(fileU, '越界续写 ✓ 被拒：' + e.message, 'ok'); });
     });
 
     /* ---------- 录屏 ---------- */

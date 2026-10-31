@@ -39,6 +39,13 @@ import java.nio.charset.StandardCharsets;
  * 就是「一点反应都没有」。网页侧现在先发 file.capabilities 探能力（有人回才走
  * 二进制写，没人回说明是浏览器，退回 &lt;a download&gt;），再把字节按块交过来。
  * 第一片建文件、后续片带 uri + append:true 续写；块大小由 maxChunkBytes 给出上限。
+ *
+ * <p>v2.1（2026-10-31）把「位置」收回壳手里：带回来的 uri / path 必须是本壳
+ * file.writePublic 这次发出去过的（见 {@link PublicWriteScope}），否则直接拒。
+ * v2 让页面自己带地址来续写，等于页面说写到哪就写到哪——file: 能覆盖本 App 的
+ * 定位兜底日志，26-28 那条分支还能绕过 safeName 往外部存储任意路径写，
+ * readPublic / deletePublic 同样照单全收。协议形状不变，只是多收一条错误：
+ * 页面刷新后清单空了还拿旧 uri 来续写，会收到「公共文件位置不认识」。
  */
 public class FileBridge {
   private static final String LOGTAG = "FileBridge";
@@ -46,6 +53,9 @@ public class FileBridge {
   private final Context mContext;
   private final JsBridge mBridge;
   private final File mPrivateDir;
+
+  /** 公共目录落点的清单：见 {@link PublicWriteScope}，写读删三个动作共用同一份 */
+  private final PublicWriteScope mPublicScope = new PublicWriteScope();
 
   public FileBridge(Context context, JsBridge bridge) {
     mContext = context.getApplicationContext();
@@ -103,8 +113,7 @@ public class FileBridge {
    * -------------------------------------------------------------------------- */
 
   private String safeName(String name) {
-    String n = name.replace("..", "_").replace("/", "_").replace("\\", "_");
-    return n.isEmpty() ? "unnamed" : n;
+    return PublicWriteScope.safeName(name);
   }
 
   private void writePrivate(String id, JSONObject params, JsBridge bridge, boolean append) throws Exception {
@@ -200,17 +209,27 @@ public class FileBridge {
 
   private void writePublic(String id, JSONObject params, JsBridge bridge) throws Exception {
     String name = safeName(params.optString("name", "file_" + System.currentTimeMillis() + ".txt"));
-    String content = params.optString("content", "");
     String mime = params.optString("mime", "text/plain");
     byte[] bytes = contentBytes(params);
     boolean append = params.optBoolean("append", false);
     String uriParam = params.optString("uri", "");
 
+    // 位置先过壳的清单再谈别的：清单外的地址连权限框都不该弹出来
+    PublicWriteScope.Decision d = mPublicScope.resolveWrite(uriParam);
+    if (d.error != null) {
+      bridge.respond(id, false, null, d.error);
+      return;
+    }
+    // 只有「往壳自己发出去过的位置上追加」才算续写；建新文件时 append 参数没有意义
+    boolean cont = !d.createNew;
+
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
       // MediaStore.Downloads - no storage permission needed on API 29+
       ContentResolver cr = mContext.getContentResolver();
-      android.net.Uri uri = uriParam.isEmpty() ? null : android.net.Uri.parse(uriParam);
-      if (uri == null) {
+      android.net.Uri uri = null;
+      if (cont) {
+        uri = android.net.Uri.parse(d.target);
+      } else {
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, name);
         values.put(MediaStore.Downloads.MIME_TYPE, mime);
@@ -221,11 +240,12 @@ public class FileBridge {
           return;
         }
       }
-      boolean wrote = writeUri(cr, uri, bytes, append && !uriParam.isEmpty());
-      if (!wrote) {
+      if (!writeUri(cr, uri, bytes, append && cont)) {
         bridge.respond(id, false, null, "写入公共文件失败（续写不支持且超过重写上限）");
         return;
       }
+      // 首片建出来的落点从这一刻起才允许被续写；返给页面的字符串与记进清单的必须是同一个
+      mPublicScope.issue(uri.toString());
       JSONObject r = new JSONObject();
       r.put("uri", uri.toString());
       r.put("name", name);
@@ -242,10 +262,14 @@ public class FileBridge {
                 File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
                 //noinspection ResultOfMethodCallIgnored
                 dir.mkdirs();
-                File f = uriParam.isEmpty() ? new File(dir, name) : new File(uriParam);
-                writeFile(f, bytes, append);
+                // 续写用清单里那条路径（它本来就是壳按 Downloads + safeName 算出来的），
+                // 建新文件才用页面给的 name——页面自报的绝对路径在这一行已经没有入口了
+                File f = cont ? new File(d.target) : new File(dir, name);
+                writeFile(f, bytes, append && cont);
+                String target = f.getAbsolutePath();
+                mPublicScope.issue(target);
                 JSONObject r = new JSONObject();
-                r.put("path", f.getAbsolutePath());
+                r.put("path", target);
                 r.put("name", f.getName());
                 r.put("location", "Downloads");
                 r.put("bytes", bytes.length);
@@ -315,13 +339,12 @@ public class FileBridge {
 
   private void readPublic(String id, JSONObject params, JsBridge bridge) throws Exception {
     String uri = params.optString("uri", "");
-    if (uri.isEmpty()) {
-      bridge.respond(id, false, null, "缺少 uri");
+    PublicWriteScope.Decision d = mPublicScope.resolveTarget(uri);
+    if (d.error != null) {
+      bridge.respond(id, false, null, d.error);
       return;
     }
-    android.net.Uri u = android.net.Uri.parse(uri);
-    ContentResolver cr = mContext.getContentResolver();
-    try (InputStream in = cr.openInputStream(u)) {
+    try (InputStream in = openPublicIn(d.target)) {
       ByteArrayOutputStream buf = new ByteArrayOutputStream();
       byte[] tmp = new byte[8192];
       int n;
@@ -334,15 +357,42 @@ public class FileBridge {
     }
   }
 
+  /**
+   * 打开一个公共文件读。清单里两种串都有：29+ 是 content uri，26-28 是普通路径——
+   * 后者 ContentResolver 不认（真机上 Unknown URI，「读取」按钮在 Android 8-9 一直是坏的），
+   * 只能直接开文件。
+   */
+  private InputStream openPublicIn(String target) throws Exception {
+    if (target.startsWith("content://")) {
+      InputStream in = mContext.getContentResolver().openInputStream(android.net.Uri.parse(target));
+      if (in == null) {
+        throw new Exception("读取公共文件失败");
+      }
+      return in;
+    }
+    return new FileInputStream(new File(target));
+  }
+
   private void deletePublic(String id, JSONObject params, JsBridge bridge) throws Exception {
     String uri = params.optString("uri", "");
-    if (uri.isEmpty()) {
-      bridge.respond(id, false, null, "缺少 uri");
+    PublicWriteScope.Decision d = mPublicScope.resolveTarget(uri);
+    if (d.error != null) {
+      bridge.respond(id, false, null, d.error);
       return;
     }
-    int deleted = mContext.getContentResolver().delete(android.net.Uri.parse(uri), null, null);
+    boolean deleted;
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q || d.target.startsWith("content://")) {
+      deleted = mContext.getContentResolver().delete(android.net.Uri.parse(d.target), null, null) > 0;
+    } else {
+      // 26-28 记进清单的是一条普通路径，ContentResolver 删不了它，直接删文件
+      File f = new File(d.target);
+      deleted = f.exists() && f.delete();
+    }
     JSONObject r = new JSONObject();
-    r.put("deleted", deleted > 0);
+    r.put("deleted", deleted);
+    if (deleted) {
+      mPublicScope.forget(d.target);
+    }
     bridge.respond(id, true, r, null);
   }
 }
