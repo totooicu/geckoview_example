@@ -57,6 +57,7 @@ public class JsBridge {
   private FileBridge mFiles;
   private ScreenCaptureManager mScreen;
   private LocationBridge mLocation;
+  private NetBridge mNet;
 
   public JsBridge(Activity activity) {
     mActivity = new WeakReference<>(activity);
@@ -64,6 +65,8 @@ public class JsBridge {
     mFiles = new FileBridge(activity, this);
     mScreen = new ScreenCaptureManager(activity, this);
     mLocation = new LocationBridge(activity, this);
+    // 原生网络代理：不依赖 Activity、不碰权限；这里只建线程池对象，真要发请求才起线程
+    mNet = new NetBridge();
   }
 
   /** Called by the hosting activity once the WebView exists. */
@@ -152,6 +155,8 @@ public class JsBridge {
       mScreen.handle(id, action, params, this);
     } else if (action.startsWith("location.")) {
       mLocation.handle(id, action, params, this);
+    } else if (action.startsWith("net.")) {
+      mNet.handle(id, action, params, this);
     } else if (action.startsWith("ui.")) {
       handleUi(id, action, params);
     } else {
@@ -352,6 +357,10 @@ public class JsBridge {
   public void onDestroy() {
     if (mBle != null) {
       mBle.onDestroy();
+    }
+    if (mNet != null) {
+      // 只 shutdownNow()：请求线程是 daemon，就算这里漏了也不会拦住进程退出
+      mNet.onDestroy();
     }
     mWebView = null;
   }
