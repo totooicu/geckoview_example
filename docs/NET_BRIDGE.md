@@ -40,7 +40,7 @@
 - `NetHttp.java`：纯 `java.*` 的 HTTP/1.1 客户端（自己写请求行、自己收响应）。
   不用 `HttpURLConnection` 是因为 Android 的实现只认 GET/POST/HEAD/OPTIONS/PUT/DELETE/TRACE，
   发 `PROPFIND` 直接抛 `ProtocolException`，反射改私有字段在 ART 上属于隐藏接口、随时会失效。
-  **这一层可以在桌面上真跑**：`tools/net-http-test/`（假坚果云 + 24 项断言）。
+  **这一层可以在桌面上真跑**：`tools/net-http-test/`（假坚果云 + 24 项断言，加 --live 25 项）。
 - `NetBridge.java`：只做 base64、线程池（两条 daemon 线程）、应答格式。
   沙箱没有 Android SDK，这一层在桌面上**只编译不运行**（`run.sh` 第 0 步拿
   `tools/file-write-test/stubs/` 编一遍），行为要靠真机或网页侧验。

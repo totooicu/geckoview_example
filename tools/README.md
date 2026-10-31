@@ -4,7 +4,7 @@
 `@deprecated`，真要删除必须在提交信息写明理由，并在本表留一行「已移除：X（原因）」。
 
 > 这份索引在 `main` 线上是第一条 `tools/` 记录。坚果云测试那条线
-> （`origin/test/nutstore`）早就有 `tools/net-http-test/`（假坚果云 + 24 项断言）与
+> （`origin/test/nutstore`）早就有 `tools/net-http-test/`（假坚果云 + 24 项断言，加 --live 25 项）与
 > `tools/nutstore-page-test/`，那是那条线的工具，两边不共用；那条线合并过来时，
 > 把它的条目并到本表，不要各留一份 README。
 >
