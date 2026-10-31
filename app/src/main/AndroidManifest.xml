@@ -31,6 +31,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 开机自启动：只在「跨设备操作」打开过自启动时才拉起前台服务 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.CREDENTIAL_MANAGER_SET_ORIGIN" />
     <uses-permission android:name="android.permission.CREDENTIAL_MANAGER_QUERY_CANDIDATE_CREDENTIALS" />
 
@@ -76,6 +78,26 @@
             android:name=".jsbridge.LocationTrackingService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <!-- 跨设备操作：壳端局域网服务器。specialUse 是唯一能长期保持
+             「网页自己不能监听端口」这类后台网络服务的类型 -->
+        <service
+            android:name=".jsbridge.DataShareService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="LAN data relay for the user's own app data" />
+        </service>
+
+        <receiver
+            android:name=".jsbridge.DataShareBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

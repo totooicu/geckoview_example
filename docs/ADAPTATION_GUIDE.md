@@ -152,6 +152,8 @@ window.addEventListener('message', (e) => {
 
 > 桥由 App 在 `onPageStarted` / `onPageFinished` 注入适配脚本自动接通，页面无需等待标记，首次调用前 `await bridge('ping')` 即可自检。
 
+> **action 按前缀分派**：`ble.*` / `file.*` / `screen.*` / `location.*` / `net.*` / `remote.*` / `ui.*` / `ping`，各自进自己的 Bridge 模块（见 §6）。新增一组能力时，加前缀分支即可，不必改已有模块。
+
 > **`location.setConfig` 的权限时序**：`enabled:true` 但缺定位权限时，壳会先弹系统权限申请（与 `location.start` 同一条路径），用户的授权结果决定应答——因此这一次桥调用的 resolve/reject 可能**延迟到权限弹窗有了结果之后**；用户拒绝时回 `ok:false`（不静默跳过），页面应据此降级（如退回页面自己的定时器）。
 
 ### 3.3 常用调用示例
@@ -362,11 +364,63 @@ intent 传的 `page` 必须精确命中，`shouldOverrideUrlLoading` 也只放�
 - 壳报的错误原样显示，不改写：错在网络上传时却提示用户「去配反向代理」是最坏的提示。
 - 页面里那句「怎么打开这一页」是给用户看的，别删。
 
+### 4.7 数据共享服务器 `DataShareBridge` + `DataShareServer`（`remote.*`，2026-10-31 新增）
+
+**为什么要有它**：网页的库存在自己源的 IndexedDB 里（sql.js），壳和浏览器不同源，
+读不到彼此的数据。壳干脆在手机上起一个局域网服务器：别的设备打开
+`http://手机IP:4173/`，用的就是手机这个源、手机这份数据。
+
+这里**只转发、不读库**：数据在 WebView 的 IndexedDB 里、sql.js 也在页面线程，
+原生读不到。服务端仍是手机页面，客户端只是把 `RemoteTransport` 的消息转过去，
+自己不落库。所以这个功能不是「壳导出数据」，而是「壳把页面提供给别的设备连」。
+
+| action | 参数 | 返回 | 说明 |
+|---|---|---|---|
+| `remote.capabilities` | — | `{version, defaultPort, actions}` | 探测壳有没有这个能力，页面据此决定显示「壳端服务」还是退回浏览器中继 |
+| `remote.status` | — | `{ok, running, port, token, autostart, hostOnline, clients, addresses}` | 读运行态。`addresses` 是手机局域网 IPv4 列表，`token` 只在运行中才有意义 |
+| `remote.start` | `{port?, token?}` | 同 `status` | 起端口（端口由壳固定，默认 4173；页面传别的值只当建议）。已在跑就复用 |
+| `remote.stop` | — | 同 `status` | 停端口，所有 WS 连接断开，客户端会收到「服务端已离线」 |
+| `remote.autostart` | `{enabled}` | 同 `status` | 写壳端 `SharedPreferences`，决定开机 `BootReceiver` 是否拉起前台服务 |
+
+生命周期（别和页面存档搞混）：
+
+- **页面存档**（`localStorage['dr.svc.autostart']`）决定「网页刷新/重开时要不要恢复服务」；
+- **壳端偏好**（`SharedPreferences data_share`）决定「手机关机重启后要不要拉起」。
+- 两个开关由服务页同一个复选框同时写。只写一边会出现「重启手机服务没了」或「页面不恢复」。
+- 端口起来后是一个**前台服务**（`specialUse`，API 34+），通知里写着局域网地址和
+  「保持壳打开」。壳被系统杀掉时服务会 `START_STICKY` 重来，但**页面得开着**：
+  服务端那条 WS 是页面连的，页面关掉就等于数据源下线，客户端会看到离线提示。
+- `BOOT_COMPLETED` 只在 `autostart=true` 时拉起服务；拉起后若页面没开，端口在等，
+  `__remote/info` 会报 `hostOnline=false`。
+
+服务器实现（`DataShareServer.java`，纯 `java.*`，可在桌面跑）：
+
+- 静态代理：`https://totooicu.github.io/DatingRecord/` 拉到内存（10 分钟缓存、32MB 上限），
+  无扩展名的路径回落到首页（hash 路由不需要，但 `/remote` 这类直链要有页面）。
+  拉不到时回一张 502 HTML，写明「手机可能断网」。
+- 同源的意义：客户端从 `http://手机IP:4173` 打开，页面自己就发 `ws://手机IP:4173/remote`；
+  `http` 源下浏览器允许明文 WS。手机页面是 https 源，连的是 `ws://127.0.0.1`——
+  回环地址按「潜在可信」处理，混合内容也放行，所以两端都不用手动改协议。
+- `/__remote/info`：带 CORS，给页面/脚本查 `tokenOk`、`hostOnline`、`clients`、`addresses`。
+- `/__remote/listen`：**明确拒绝**（返回 `{ok:false, error}`）。端口由壳控制，不允许网页换端口。
+- WS：手写握手 + 帧解析（掩码、126/127 长度、分片、ping/pong/close），按 token 分房间，
+  房间里的 `host` 唯一，其余是 `cN` 客户端；转发规则与 `tools/remote-relay/server.mjs` 完全一致，
+  所以网页端 `src/core/remote/*` 一行都不用改。
+
+桌面回归（不装 Android 也能跑真协议）：
+
+```bash
+cd tools/datashare-test && ./run.sh      # 起纯 Java 服务器 + Node 客户端，31 项断言
+```
+
+断言覆盖：info/token 校验、客户端先到、服务端欢迎名单、双向转发、peer join、
+broadcast、3MB 分帧、服务端离线踢人、错误 token 握手拒绝、listen 拒绝、首页代理返回 HTML。
+
 ---
 
 ## 5. 权限处理（重点）
 
-### 5.1 Manifest 权限总表（21 个）
+### 5.1 Manifest 权限总表（23 个）
 
 | 权限 | 用途 | 备注 |
 |---|---|---|
@@ -376,16 +430,19 @@ intent 传的 `page` 必须精确命中，`shouldOverrideUrlLoading` 也只放�
 | `BLUETOOTH_CONNECT` | 蓝牙连接 | API 31+ 运行时 |
 | `BLUETOOTH_ADVERTISE` | 蓝牙广播 | API 31+ 运行时 |
 | `ACCESS_COARSE/FINE_LOCATION` | 蓝牙扫描+定位 | 运行时 |
+| `ACCESS_BACKGROUND_LOCATION` | 后台持续定位（自动打点） | API 29+ 运行时 |
 | `RECORD_AUDIO` | 麦克风 | 运行时 |
 | `MODIFY_AUDIO_SETTINGS` | WebView 录音的音频模式 | 普通权限；部分定制 ROM 缺它会报 `NotReadableError` |
 | `CAMERA` | 摄像头 | 运行时 |
 | `READ_EXTERNAL_STORAGE` | 兼容旧版读文件 | `maxSdkVersion=32` |
 | `WRITE_EXTERNAL_STORAGE` | 兼容旧版写文件 | `maxSdkVersion=28` |
 | `ACCESS_WIFI_STATE` | 辅助扫描 | 普通权限 |
-| `POST_NOTIFICATIONS` | 录屏前台通知 | API 33+ 运行时 |
-| `FOREGROUND_SERVICE` | 录屏服务 | 普通权限 |
+| `POST_NOTIFICATIONS` | 录屏 / 数据共享的前台通知 | API 33+ 运行时 |
+| `FOREGROUND_SERVICE` | 录屏 / 数据共享服务 | 普通权限 |
 | `FOREGROUND_SERVICE_MEDIA_PROJECTION` | 录屏前台服务类型 | 必须 |
-| `FOREGROUND_SERVICE_SPECIAL_USE` | 录屏兜底 | 必须 |
+| `FOREGROUND_SERVICE_LOCATION` | 后台定位前台服务类型 | 必须 |
+| `FOREGROUND_SERVICE_SPECIAL_USE` | 数据共享服务类型（API 34+） | 必须 |
+| `RECEIVE_BOOT_COMPLETED` | 开机拉起数据共享服务（仅自启动开启时） | 普通权限 |
 | `CREDENTIAL_MANAGER_*` | 凭据/自动填充兼容 | 普通权限 |
 
 > 适配时如不需要某个能力，可删除对应权限和 Manifest 里的 service 配置。
@@ -431,6 +488,11 @@ intent 传的 `page` 必须精确命中，`shouldOverrideUrlLoading` 也只放�
 | `jsbridge/NetBridge.java` | 网络代理 `net.*`：参数校验、base64、线程池、应答格式 |
 | `jsbridge/NetHttp.java` | 纯 `java.*` 的 HTTP/1.1 客户端（任意动词、自己拼请求行），桌面可直接测 |
 | `jsbridge/ScreenCaptureManager.java` + `ScreenCaptureService.java` | 录屏 |
+| `jsbridge/DataShareBridge.java` | 数据共享 `remote.*`：动作分发、状态 JSON、启停/自启动 |
+| `jsbridge/DataShareServer.java` | 纯 `java.*` 的 HTTP + WebSocket 服务器：代理页面、按 token 分房间转发 |
+| `jsbridge/DataShareService.java` | 前台服务：保活端口，通知里给局域网地址 |
+| `jsbridge/DataShareStore.java` | 壳端偏好（端口 / token / 自启动） |
+| `jsbridge/DataShareBootReceiver.java` | `BOOT_COMPLETED` → 自启动开启时拉起前台服务 |
 | `app/src/main/AndroidManifest.xml` | 权限 + Activity/Service 声明 |
 
 新增一个原生能力的最小改动（以 `foo.bar` 为例）：

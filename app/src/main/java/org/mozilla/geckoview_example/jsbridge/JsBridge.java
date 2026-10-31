@@ -58,6 +58,7 @@ public class JsBridge {
   private ScreenCaptureManager mScreen;
   private LocationBridge mLocation;
   private NetBridge mNet;
+  private DataShareBridge mShare;
 
   public JsBridge(Activity activity) {
     mActivity = new WeakReference<>(activity);
@@ -66,6 +67,7 @@ public class JsBridge {
     mScreen = new ScreenCaptureManager(activity, this);
     mLocation = new LocationBridge(activity, this);
     mNet = new NetBridge();
+    mShare = new DataShareBridge(activity.getApplicationContext());
   }
 
   /** Called by the hosting activity once the WebView exists. */
@@ -157,6 +159,8 @@ public class JsBridge {
       mLocation.handle(id, action, params, this);
     } else if (action.startsWith("net.")) {
       mNet.handle(id, action, params, this);
+    } else if (action.startsWith("remote.")) {
+      mShare.handle(id, action, params, this);
     } else if (action.startsWith("ui.")) {
       handleUi(id, action, params);
     } else {
