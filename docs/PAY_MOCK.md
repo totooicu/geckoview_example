@@ -75,7 +75,11 @@ cd tools/pay-test && ./run.sh
 依赖：JDK 8+、Node 18+。脚本会：
 1. `javac` 编译 `PayMock.java` + `DataShareServer.java` + `PayMockSelfTestServer.java`
 2. 起 HTTP 服务端（端口 41788）
-3. `node client.mjs` 走完整协议（90 项断言，含 3 项源码级的「壳加载地址」检查）
+3. `node client.mjs` 走完整协议（92 项断言，含 5 项源码级的「壳加载地址」检查）
+
+`javac` 只编这三个纯 `java.*` 的文件，**编不了 `WebViewActivity.java`**（要 Android SDK）。
+那道门禁现在由 CI 补上：推分支自动跑 `assembleDebug`，产物挂在 Actions 的 Artifacts 上、
+手机浏览器直接下载，取包步骤与边界见 `docs/CI_GUIDE.md`。
 
 **网页侧跨仓复用启动命令：**
 

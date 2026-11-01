@@ -164,10 +164,12 @@ geckoview_example/
 - 远程仓库：`origin → git@github.com:totooicu/geckoview_example.git`，走 SSH
   （`~/.ssh/id_ed25519_github`，已认证为 `totooicu`，实测有读写权限）。
 - **沙箱无 Android SDK**：`java`/`javac` 有（sdkman），`./gradlew` 构建必须在
-  用户机器或 CI 跑；门禁细节见铁律五第 3 条。
+  用户机器或 CI 跑；门禁细节见铁律五第 3 条。CI 那条已经配好，取包与边界见 `docs/CI_GUIDE.md`。
 - **`gh` 未登录、无 token**：看 Actions 用公开 API
-  `curl -s https://api.github.com/repos/totooicu/geckoview_example/actions/runs?per_page=5`
-  （本仓库目前无 workflow；若要加 CI，注意 APK 构建runner 需要 Android SDK）。
+  `curl -s https://api.github.com/repos/totooicu/geckoview_example/actions/runs?per_page=5`。
+  `.github/workflows/apk.yml` 自 2026-11-01 起存在，但**只随 `test/payment-recharge` 这条线走**：
+  push 触发读的是被推提交里的 workflow 文件，所以别的分支（含 `main`）没有这个文件就不会跑。
+  「本仓库无自动发布链路」这条没变——CI 只出 debug 包供取用与编译佐证，不打 tag、不写 `releases/`。
 - **发布形态不同**：网页侧走 DatingRecord 的 `deploy-pages.yml` 自动部署；
   壳侧 APK 手动分发，没有自动发布链路——「合并即发布」不适用于本仓库，
   合并只代表代码进入 `main`。

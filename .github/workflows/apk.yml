@@ -1,0 +1,101 @@
+name: 编 APK（取包用，不是发版）
+
+# 为什么要有这条：沙箱和手机都没有 Android SDK，Java 改动在推上去之前编不了，
+# 用户只能在本机构包。这条 workflow 把「assembleDebug」搬进 CI，产物进本次
+# run 的 Artifacts，手机浏览器登录 GitHub 就能下（Actions → 本次 run → Artifacts）。
+#
+# 三条边界，写在宪法里也在这儿重复一遍，免得日后含混：
+#   1. **这不是发布链路**。不打 tag、不动 releases/、不上传 Release 资产，
+#      也不参与 RELEASE_GUIDE.md 的版本配对记录。它只回答「这份代码能不能编、编出来装得上吗」。
+#   2. **签名用 runner 每次临时生成的 debug 钥匙**（铁律二：keystore 不入库）。
+#      后果是每次 CI 出的包签名都可能不一样，同签名才能覆盖安装——装新包前多半要先卸载，
+#      卸载会连同 WebView 里的本地库一起清掉，先导一份 .drp。
+#   3. **BuildConfig.BUILD_TIME 是写死在 app/build.gradle 里的**（发版规则，禁止随构建
+#      动态生成）。所以版本条上那个时间**不区分**这些包，认的是 `GIT_COMMIT`——
+#      下面「取包看这里」那步会把它写进 run 摘要，下载前对着看。
+
+on:
+  push:
+    branches: ['main', 'test/**', 'feat/**']
+  workflow_dispatch: {}
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  debug-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # gradle.properties 里有一行 org.gradle.java.home=/home/user/jdk/jdk-17.0.20.1+1，
+      # 那是本机的绝对路径，runner 上不存在，Gradle 会直接报「invalid」。不改库里那行
+      # （改了会破坏用户本地构建），在命令行用 -D 覆盖成 runner 自己的 JAVA_HOME。
+      - name: 准备 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 装 SDK 组件（缺件时 AGP 也会自己下，这里只是提前接受许可）
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          # compileSdk 是 API 37（含 minor），不同镜像里的包名不完全一致，逐个试；
+          # 装不上不算失败——真正解析由 AGP 完成，失败会在下一步的日志里说清楚。
+          for p in "platforms;android-37" "platforms;android-37.0.2" "build-tools;37.0.0"; do
+            if sdkmanager --install "$p" >/dev/null 2>&1; then
+              echo "已装：$p"
+            else
+              echo "跳过：$p（不存在或已装）"
+            fi
+          done
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" 2>/dev/null || echo '(platforms 目录为空)'
+
+      - name: assembleDebug
+        run: |
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
+            -Dorg.gradle.java.home="$JAVA_HOME"
+
+      - name: 取包看这里（版本、commit、构建号写进 run 摘要）
+        if: always()
+        run: |
+          BC=$(find app/build -name BuildConfig.java -path '*debug*' | head -1)
+          {
+            echo "### 这一份包"
+            echo
+            echo "| 项 | 值 |"
+            echo '|---|---|'
+            echo "| 分支 | \`${GITHUB_REF_NAME}\` |"
+            echo "| 提交 | \`${GITHUB_SHA}\` |"
+            echo "| 触发 | ${{ github.event_name }} by ${{ github.actor }} |"
+            if [ -n "$BC" ]; then
+              echo "| versionName | $(grep -o 'VERSION_NAME = "[^"]*"' "$BC" | cut -d'"' -f2) |"
+              echo "| BUILD_TIME（写死，不区分包） | $(grep -o 'BUILD_TIME = "[^"]*"' "$BC" | cut -d'"' -f2) |"
+              echo "| GIT_COMMIT（**认这个**） | $(grep -o 'GIT_COMMIT = "[^"]*"' "$BC" | cut -d'"' -f2) |"
+            fi
+            if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+              echo "| APK | $(stat -c %s app/build/outputs/apk/debug/app-debug.apk) 字节 |"
+            else
+              echo '| APK | **没产出来**，看上面的构建日志 |'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 定 Artifacts 名字
+        # 分支名 `test/payment-recharge` 带斜杠，不能直接当 Artifacts 名；
+        # 名字里带上提交短哈希，手机上一眼能分清下的是哪一份。
+        run: echo "ARTIFACT_NAME=apk-$(echo "$GITHUB_REF_NAME" | tr '/' '-')-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: 上传到本次 run 的 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
