@@ -229,13 +229,26 @@ async function main() {
   check('收银台未知订单返回 200（HTML 错误页）', cashierNotFound.status === 200);
   check('收银台未知订单含「订单不存在」', cashierNotFound.text.includes('订单不存在'));
 
+  // ---- XSS 防护 ----
+  console.log('\n== XSS 防护 ==');
+  // 下单时 returnUrl 里塞 <script> 标签，看收银台是否转义
+  const xssOrder = await postJson(`${BASE}/__pay/order`, {
+    service: { id: 'test.xss', title: '<script>alert(1)</script>', amountCents: 999 },
+    returnUrl: 'http://evil.com/<img src=x onerror=alert(1)>',
+  });
+  const xssId = xssOrder.body.orderId;
+  const xssCashier = await getText(`${BASE}/__pay/cashier?order=${xssId}&channel=alipay`);
+  check('收银台不原样包含 <script>', !xssCashier.text.includes('<script>alert'));
+  check('收银台 HTML 转义了 <', xssCashier.text.includes('&lt;script&gt;'));
+  check('收银台 JS 转义了 returnUrl', xssCashier.text.includes('\\x3c') || !xssCashier.text.includes('<img'));
+
   // ---- 8. /orders 列表长度与顺序 ----
   console.log('\n== /orders 列表 ==');
   const orders = await getJson(`${BASE}/__pay/orders`);
   check('/orders 返回 200', orders.status === 200);
   check('/orders 含 orders 数组', orders.body && Array.isArray(orders.body.orders));
-  // 我们创建了 6 个订单
-  check('/orders 长度=6', orders.body && orders.body.orders.length === 6,
+  // 我们创建了 7 个不重复的订单（6 个功能测试 + 1 个 XSS 测试）
+  check('/orders 长度=7', orders.body && orders.body.orders.length === 7,
     orders.body ? String(orders.body.orders.length) : 'null');
   // 按下单时间升序
   if (orders.body && orders.body.orders.length >= 2) {
@@ -262,6 +275,22 @@ async function main() {
   check('cancelled 是合法状态', validStatuses.includes('cancelled'));
   check('expired 是合法状态', validStatuses.includes('expired'));
   check('refunded 是合法状态', validStatuses.includes('refunded'));
+
+  // ---- CORS 预检 ----
+  console.log('\n== CORS ==');
+  const optionsRes = await fetch(`${BASE}/__pay/order`, { method: 'OPTIONS' });
+  check('OPTIONS 返回 204', optionsRes.status === 204, `got ${optionsRes.status}`);
+  check('OPTIONS 含 Access-Control-Allow-Origin', optionsRes.headers.get('access-control-allow-origin') === '*');
+  check('OPTIONS 含 Access-Control-Allow-Methods', /POST/.test(optionsRes.headers.get('access-control-allow-methods') || ''));
+  check('OPTIONS 含 Access-Control-Allow-Headers', /Content-Type/i.test(optionsRes.headers.get('access-control-allow-headers') || ''));
+
+  // 普通响应也带 CORS 头
+  const corsGet = await fetch(`${BASE}/__pay/orders`);
+  check('GET /__pay/orders 含 Access-Control-Allow-Origin', corsGet.headers.get('access-control-allow-origin') === '*');
+
+  // 收银台 HTML 也带 CORS 头
+  const corsCashier = await fetch(`${BASE}/__pay/cashier?order=${o6id}&channel=alipay`);
+  check('GET /__pay/cashier 含 Access-Control-Allow-Origin', corsCashier.headers.get('access-control-allow-origin') === '*');
 
   // ---- 汇总 ----
   console.log('\n========== 汇总 ==========');

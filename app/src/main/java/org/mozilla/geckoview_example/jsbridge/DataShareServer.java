@@ -442,6 +442,19 @@ public final class DataShareServer {
     PayMock pay = PayMock.get();
     String path = url.path;
 
+    // OPTIONS 预检：/__pay/* 全组支持跨域
+    if ("OPTIONS".equals(method)) {
+      out.write(
+          ("HTTP/1.1 204 No Content\r\n"
+              + "Access-Control-Allow-Origin: *\r\n"
+              + "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+              + "Access-Control-Allow-Headers: Content-Type\r\n"
+              + "Content-Length: 0\r\n"
+              + "Connection: close\r\n\r\n").getBytes(UTF8));
+      out.flush();
+      return;
+    }
+
     // POST /__pay/order — 下单 or 驱动状态
     if ("/__pay/order".equals(path)) {
       if ("POST".equals(method)) {

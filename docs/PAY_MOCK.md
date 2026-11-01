@@ -81,6 +81,7 @@ cd tools/pay-test && ./run.sh
 
 ```bash
 # 在 geckoview_example 仓库根目录下
+# 最小编译集合：PayMock.java + DataShareServer.java + 入口类（纯 java.*，不依赖 Android API）
 javac -encoding UTF-8 -d /tmp/paymock-classes \
   app/src/main/java/org/mozilla/geckoview_example/jsbridge/PayMock.java \
   app/src/main/java/org/mozilla/geckoview_example/jsbridge/DataShareServer.java \
@@ -89,6 +90,9 @@ javac -encoding UTF-8 -d /tmp/paymock-classes \
 java -cp /tmp/paymock-classes \
   org.mozilla.geckoview_example.jsbridge.PayMockSelfTestServer 41788 paytest01
 ```
+
+依赖链：`PayMock.java` 和 `DataShareServer.java` 都只用 `java.*`，不依赖 Android API，
+可以一把 `javac` 过。`PayMockSelfTestServer.java` 是入口，调 `DataShareServer.get().start(port, token)`。
 
 端口用 417xx 段，**避开 4190**（WHATWG 禁用端口，node fetch 会直接报 bad port）。
 

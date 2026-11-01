@@ -398,7 +398,9 @@ public final class PayMock {
 
   private static String escapeJs(String s) {
     if (s == null) return "";
-    return s.replace("\\", "\\\\").replace("'", "\\'").replace("\"", "\\\"");
+    // 防 </script> 突破：把 < 转成 \x3c
+    return s.replace("\\", "\\\\").replace("'", "\\'").replace("\"", "\\\"")
+        .replace("<", "\\x3c").replace(">", "\\x3e");
   }
 
   /** 操作结果 */
