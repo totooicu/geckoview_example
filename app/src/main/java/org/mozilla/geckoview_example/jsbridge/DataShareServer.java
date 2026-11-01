@@ -271,7 +271,28 @@ public final class DataShareServer {
         handleUpgrade(socket, in, out, target, headers);
         return;
       }
-      handleHttp(socket, out, method, target);
+
+      // 读取 POST body（如果有）
+      byte[] body = null;
+      String contentLengthStr = headers.get("content-length");
+      if (contentLengthStr != null && ("POST".equals(method) || "PUT".equals(method))) {
+        try {
+          int contentLength = Integer.parseInt(contentLengthStr.trim());
+          if (contentLength > 0 && contentLength <= 1024 * 1024) {
+            body = new byte[contentLength];
+            int read = 0;
+            while (read < contentLength) {
+              int n = in.read(body, read, contentLength - read);
+              if (n < 0) break;
+              read += n;
+            }
+          }
+        } catch (NumberFormatException ignored) {
+          // ignore
+        }
+      }
+
+      handleHttp(socket, out, method, target, headers, body);
     } catch (IOException e) {
       closeQuietly(socket);
     } finally {
@@ -281,8 +302,15 @@ public final class DataShareServer {
 
   // ---------------------------------------------------------------- HTTP
 
-  private void handleHttp(Socket socket, OutputStream out, String method, String target) throws IOException {
+  private void handleHttp(Socket socket, OutputStream out, String method, String target,
+                          Map<String, String> headers, byte[] body) throws IOException {
     ParsedUrl url = ParsedUrl.parse(target);
+
+    // ---- /__pay/* 路由组 ----
+    if (url.path != null && url.path.startsWith("/__pay")) {
+      handlePay(out, method, url, body);
+      return;
+    }
 
     if ("/__remote/info".equals(url.path)) {
       writeJson(out, infoJson(url.query.get("token")));
@@ -404,6 +432,154 @@ public final class DataShareServer {
                 + bytes.length
                 + "\r\nConnection: close\r\n\r\n")
             .getBytes(UTF8));
+    out.write(bytes);
+    out.flush();
+  }
+
+  // ---------------------------------------------------------------- /__pay/* 路由
+
+  private void handlePay(OutputStream out, String method, ParsedUrl url, byte[] body) throws IOException {
+    PayMock pay = PayMock.get();
+    String path = url.path;
+
+    // POST /__pay/order — 下单 or 驱动状态
+    if ("/__pay/order".equals(path)) {
+      if ("POST".equals(method)) {
+        String action = url.query.get("action");
+        if (action != null) {
+          // 驱动状态：POST /__pay/order?id=...&action=pay|fail|cancel|expire|refund
+          String id = url.query.get("id");
+          if (id == null || id.isEmpty()) {
+            writePayJson(out, 400, "{\"error\":\"missing_id\"}");
+            return;
+          }
+          PayMock.ActionResult r = pay.doAction(id, action);
+          writePayJson(out, r.status, r.json);
+          return;
+        }
+        // 下单：POST /__pay/order {service:{id,title,amountCents}, returnUrl?, channel?}
+        if (body == null || body.length == 0) {
+          writePayJson(out, 400, "{\"error\":\"empty_body\"}");
+          return;
+        }
+        String bodyStr = new String(body, UTF8);
+        String serviceJson = Json.raw(bodyStr, "service");
+        if (serviceJson == null || "null".equals(serviceJson)) {
+          writePayJson(out, 400, "{\"error\":\"missing_service\"}");
+          return;
+        }
+        String serviceId = Json.field(serviceJson, "id");
+        String serviceTitle = Json.field(serviceJson, "title");
+        // amountCents 是数字，用 raw 提取
+        String amountRaw = Json.raw(serviceJson, "amountCents");
+        long amountCents = 0;
+        try { amountCents = Long.parseLong(amountRaw.trim()); } catch (NumberFormatException ignored) {}
+        if (serviceId.isEmpty() || amountCents <= 0) {
+          writePayJson(out, 400, "{\"error\":\"bad_service\"}");
+          return;
+        }
+        String returnUrl = Json.field(bodyStr, "returnUrl");
+        String channel = Json.field(bodyStr, "channel");
+        PayMock.Order o = pay.createOrder(serviceId, serviceTitle, amountCents,
+            returnUrl.isEmpty() ? null : returnUrl,
+            channel.isEmpty() ? null : channel);
+        writePayJson(out, 200, o.toCreateJson());
+        return;
+      }
+      if ("GET".equals(method)) {
+        // GET /__pay/order?id=... — 查单
+        String id = url.query.get("id");
+        if (id == null || id.isEmpty()) {
+          writePayJson(out, 400, "{\"error\":\"missing_id\"}");
+          return;
+        }
+        PayMock.Order o = pay.getOrder(id);
+        if (o == null) {
+          writePayJson(out, 404, "{\"error\":\"order_not_found\"}");
+          return;
+        }
+        writePayJson(out, 200, o.toJson());
+        return;
+      }
+      writePayJson(out, 405, "{\"error\":\"method_not_allowed\"}");
+      return;
+    }
+
+    // POST /__pay/notify?id=...&times=N
+    if ("/__pay/notify".equals(path) && "POST".equals(method)) {
+      String id = url.query.get("id");
+      if (id == null || id.isEmpty()) {
+        writePayJson(out, 400, "{\"error\":\"missing_id\"}");
+        return;
+      }
+      int times = 1;
+      String timesStr = url.query.get("times");
+      if (timesStr != null) {
+        try { times = Integer.parseInt(timesStr); } catch (NumberFormatException ignored) {}
+      }
+      if (times < 1) times = 1;
+      PayMock.ActionResult r = pay.doNotify(id, times);
+      writePayJson(out, r.status, r.json);
+      return;
+    }
+
+    // GET /__pay/cashier?order=...&channel=...
+    if ("/__pay/cashier".equals(path) && "GET".equals(method)) {
+      String orderId = url.query.get("order");
+      String channel = url.query.get("channel");
+      if (orderId == null || orderId.isEmpty()) {
+        writeText(out, "400 Bad Request", "text/plain; charset=utf-8", "missing order");
+        return;
+      }
+      String html = pay.cashierHtml(orderId, channel != null ? channel : "alipay");
+      byte[] bytes = html.getBytes(UTF8);
+      out.write(
+          ("HTTP/1.1 200 OK\r\n"
+              + "Content-Type: text/html; charset=utf-8\r\n"
+              + "Content-Length: " + bytes.length + "\r\n"
+              + "Cache-Control: no-store\r\n"
+              + "Access-Control-Allow-Origin: *\r\n"
+              + "Connection: close\r\n\r\n").getBytes(UTF8));
+      out.write(bytes);
+      out.flush();
+      return;
+    }
+
+    // GET /__pay/orders
+    if ("/__pay/orders".equals(path) && "GET".equals(method)) {
+      List<PayMock.Order> all = pay.listOrders();
+      StringBuilder b = new StringBuilder();
+      b.append("{\"orders\":[");
+      for (int i = 0; i < all.size(); i++) {
+        if (i > 0) b.append(',');
+        b.append(all.get(i).toJson());
+      }
+      b.append("]}");
+      writePayJson(out, 200, b.toString());
+      return;
+    }
+
+    writePayJson(out, 404, "{\"error\":\"unknown_pay_route\"}");
+  }
+
+  private void writePayJson(OutputStream out, int httpStatus, String jsonBody) throws IOException {
+    byte[] bytes = jsonBody.getBytes(UTF8);
+    String statusText;
+    switch (httpStatus) {
+      case 200: statusText = "200 OK"; break;
+      case 400: statusText = "400 Bad Request"; break;
+      case 404: statusText = "404 Not Found"; break;
+      case 405: statusText = "405 Method Not Allowed"; break;
+      case 409: statusText = "409 Conflict"; break;
+      default: statusText = httpStatus + " Unknown"; break;
+    }
+    out.write(
+        ("HTTP/1.1 " + statusText + "\r\n"
+            + "Content-Type: application/json; charset=utf-8\r\n"
+            + "Content-Length: " + bytes.length + "\r\n"
+            + "Cache-Control: no-store\r\n"
+            + "Access-Control-Allow-Origin: *\r\n"
+            + "Connection: close\r\n\r\n").getBytes(UTF8));
     out.write(bytes);
     out.flush();
   }

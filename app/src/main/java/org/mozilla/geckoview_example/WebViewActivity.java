@@ -180,6 +180,14 @@ public class WebViewActivity extends AppCompatActivity {
             // Lock navigation to our own host: only totooicu.github.io may load,
             // everything else (external links, other schemes) is blocked.
             Uri u = request.getUrl();
+            String scheme = u != null ? u.getScheme() : null;
+
+            // 自定义 scheme 拦截：支付宝 / 微信支付跳转
+            // 在壳的 WebView 里点了 alipays:// / weixin:// 链接时，拦截并交给系统拉起对应 app。
+            if (scheme != null && ("alipays".equals(scheme) || "alipay".equals(scheme) || "weixin".equals(scheme))) {
+              return handlePayScheme(u, scheme);
+            }
+
             String host = u != null ? u.getHost() : null;
             if (host != null && ALLOWED_HOST.equals(host)) {
               return false; // allow in-site navigation
@@ -777,6 +785,82 @@ public class WebViewActivity extends AppCompatActivity {
     }
     mMainHandler.removeCallbacks(mBackTimeout);
     mMainHandler.postDelayed(mBackTimeout, BACK_TIMEOUT_MS);
+  }
+
+  /**
+   * 处理支付宝 / 微信 scheme 跳转。
+   *
+   * <p>判「装没装」用 packageManager.getLaunchIntentForPackage()。
+   * Android 11+ 需要在 AndroidManifest 里声明 &lt;queries&gt;，否则
+   * getLaunchIntentForPackage 恒返回 null——这是最容易踩的一条。</p>
+   *
+   * <p>装了对应 app → 起 Intent(ACTION_VIEW) 让系统去拉起，WebView 不跟着走（return true）；
+   * 没装 → 不白屏，改跳壳自己的假收银台 webUrl，并 Toast 提示。</p>
+   */
+  private boolean handlePayScheme(Uri uri, String scheme) {
+    String targetPackage;
+    String appLabel;
+    String webFallbackChannel;
+    if ("weixin".equals(scheme)) {
+      targetPackage = "com.tencent.mm";
+      appLabel = "微信";
+      webFallbackChannel = "wechat";
+    } else {
+      // alipays / alipay
+      targetPackage = "com.eg.android.AlipayGphone";
+      appLabel = "支付宝";
+      webFallbackChannel = "alipay";
+    }
+
+    boolean installed = false;
+    try {
+      Intent launchIntent = getPackageManager().getLaunchIntentForPackage(targetPackage);
+      installed = launchIntent != null;
+    } catch (Exception e) {
+      Log.w(LOGTAG, "getLaunchIntentForPackage failed for " + targetPackage, e);
+    }
+
+    if (installed) {
+      // 装了对应 app：起 Intent 让系统拉起
+      try {
+        Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(intent);
+        Log.i(LOGTAG, "launched " + appLabel + " with uri: " + uri);
+      } catch (ActivityNotFoundException e) {
+        Log.w(LOGTAG, "ActivityNotFoundException for " + uri, e);
+        // 降级到网页收银台
+        fallbackToCashier(uri, webFallbackChannel, appLabel);
+      }
+    } else {
+      // 没装 app：不白屏，改跳壳自己的假收银台
+      Log.i(LOGTAG, appLabel + " not installed, falling back to web cashier");
+      fallbackToCashier(uri, webFallbackChannel, appLabel);
+    }
+    return true; // WebView 不跟着走
+  }
+
+  /** 降级到网页收银台：从 scheme URL 里提取 orderId，跳到 /__pay/cashier */
+  private void fallbackToCashier(Uri originalUri, String channel, String appLabel) {
+    // 从 scheme URL 提取 orderId：alipays://...orderVo=PAYMOCK-<id> 或 weixin://...prepayId=PAYMOCK-<id>
+    String uriStr = originalUri.toString();
+    String orderId = null;
+    int paymockIdx = uriStr.indexOf("PAYMOCK-");
+    if (paymockIdx >= 0) {
+      String after = uriStr.substring(paymockIdx + "PAYMOCK-".length());
+      int end = after.indexOf('&');
+      orderId = end >= 0 ? after.substring(0, end) : after;
+    }
+
+    Toast.makeText(this, "没检测到" + appLabel + "，已改用网页收银台", Toast.LENGTH_SHORT).show();
+
+    if (orderId != null) {
+      // 跳壳自己的收银台（localhost:4173 是 DataShareServer 的默认端口）
+      String cashierUrl = "http://127.0.0.1:4173/__pay/cashier?order=" + orderId + "&channel=" + channel;
+      mWebView.loadUrl(cashierUrl);
+    } else {
+      Log.w(LOGTAG, "could not extract orderId from scheme uri: " + uriStr);
+    }
   }
 
   private void performDefaultBack() {

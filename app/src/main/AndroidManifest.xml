@@ -36,6 +36,17 @@
     <uses-permission android:name="android.permission.CREDENTIAL_MANAGER_SET_ORIGIN" />
     <uses-permission android:name="android.permission.CREDENTIAL_MANAGER_QUERY_CANDIDATE_CREDENTIALS" />
 
+    <!--
+      Android 11+ (API 30+) 包可见性：声明壳需要查询的第三方支付 app 包名。
+      不加 <queries>，getLaunchIntentForPackage() 恒返回 null，scheme 拦截逻辑会
+      误判为"没装 app"而始终走网页收银台降级路径。
+      这是 Android 11 引入的隐私变更，必须显式声明才能查到别的 app。
+    -->
+    <queries>
+        <package android:name="com.eg.android.AlipayGphone" />
+        <package android:name="com.tencent.mm" />
+    </queries>
+
     <application
             android:allowBackup="true"
             android:label="@string/app_name"
