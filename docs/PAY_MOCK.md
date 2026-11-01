@@ -75,7 +75,7 @@ cd tools/pay-test && ./run.sh
 依赖：JDK 8+、Node 18+。脚本会：
 1. `javac` 编译 `PayMock.java` + `DataShareServer.java` + `PayMockSelfTestServer.java`
 2. 起 HTTP 服务端（端口 41788）
-3. `node client.mjs` 走完整协议（78 项断言）
+3. `node client.mjs` 走完整协议（90 项断言，含 3 项源码级的「壳加载地址」检查）
 
 **网页侧跨仓复用启动命令：**
 
@@ -95,6 +95,38 @@ java -cp /tmp/paymock-classes \
 可以一把 `javac` 过。`PayMockSelfTestServer.java` 是入口，调 `DataShareServer.get().start(port, token)`。
 
 端口用 417xx 段，**避开 4190**（WHATWG 禁用端口，node fetch 会直接报 bad port）。
+
+## 6b. 壳加载哪份网页
+
+main 那条线加载站点根路径（跟随网页最新部署）。**这条测试线不一样**：支付入口只活在网页仓库的
+`test/payment-recharge` 上，它的产物被发到 gh-pages 的子路径，而壳从**自己那台局域网服务**上把它
+读出来：
+
+```
+壳的加载地址 = http://127.0.0.1:4173/pay-test/
+             （= DataShareServer 反代 https://totooicu.github.io/DatingRecord/pay-test/）
+```
+
+**为什么不直接写 https 那份**：收费的 `/__pay/*` 就在本机回环上，而浏览器把「公网 https 源 → 本机
+回环」当敏感访问拦掉了。实测（Chromium）报的是
+`Permission was denied for this request to access the loopback address`，给预检补
+`Access-Control-Allow-Private-Network: true` 也不够——那条头只是必要条件之一。页面改成与
+`/__pay/*` 同源，这两个限制都不再触发；39 项跨仓回归正是打在 `http://127.0.0.1:4173/pay-test/`
+上跑绿的。
+
+**代价：这台服务必须先开着。** `127.0.0.1:4173` 就是「跨设备操作」那个局域网服务，端口能改，
+地址是写死的——所以 `tools/pay-test/client.mjs` 里钉了一条「加载地址的端口 ==
+`DataShareServer.DEFAULT_PORT`」。服务没开时这一跳必然连接失败，`onReceivedError` 会退回
+`FALLBACK_URL`（线上根路径那份），人在里面把服务打开、再重进壳，就回到测试线；不退回的话
+开局就是白屏，连那颗「开启」按钮都够不着。
+
+域名锁 `ALLOWED_HOST` 原来只认 `totooicu.github.io`，这条线上多放行 `127.0.0.1` 一个字面量
+（`isAllowedHost()`，导航锁和壳自己的 `loadUrl()` 两处都走它，漏一处页面就加载不了）。
+**这两处改动连同加载地址都不许合进 main。**
+
+网页那份产物是 `base: './'` + 相对路径注册 SW，所以子路径只认自己这一份，不抢站点根的作用域。
+**它是临时的**：网页仓库的 `deploy-pages.yml` 每次部署只保留 `assets/` 与 `releases/`，
+其余根目录内容全删——下次推 main 这个子目录就没了，要重发。
 
 ## 7. 限制
 

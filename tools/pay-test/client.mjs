@@ -16,6 +16,11 @@
 // 12. 状态只有 6 个
 // 13. 终态不可逆（cancelled/failed/expired 后再 action → 409）
 // 14. refund 从 paid 可走
+// 15. 壳的加载地址钉在回环上的测试线子路径（同源才连得上 /__pay/*），端口与退路都在检查里
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const [, , BASE] = process.argv;
 if (!BASE) {
@@ -291,6 +296,31 @@ async function main() {
   // 收银台 HTML 也带 CORS 头
   const corsCashier = await fetch(`${BASE}/__pay/cashier?order=${o6id}&channel=alipay`);
   check('GET /__pay/cashier 含 Access-Control-Allow-Origin', corsCashier.headers.get('access-control-allow-origin') === '*');
+
+  // ---- 15. 壳到底加载哪份网页（源码级，不起服务器也能验）----
+  // 支付入口只活在网页那条测试分支上，而收费的 /__pay/* 就在本机回环上。公网 https 源打回环
+  // 会被浏览器的本地网络访问策略拦掉（实测补 CORS 头也不够），所以壳必须从自己那台服务上加载
+  // 页面——同源才通。地址一改就全废，而且现象像「协议不通」，所以钉在源码上，别靠人记。
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const read = (rel) => fs.readFileSync(path.join(here, '..', '..', rel), 'utf8');
+  const actSrc = read('app/src/main/java/org/mozilla/geckoview_example/WebViewActivity.java');
+  const srvSrc = read('app/src/main/java/org/mozilla/geckoview_example/jsbridge/DataShareServer.java');
+  const grab = (src, name) => (src.match(new RegExp(name + '\\s*=\\s*"([^"]+)"')) || [])[1] || '(没找到)';
+  const loadedUrl = grab(actSrc, 'DEFAULT_URL');
+  const fallbackUrl = grab(actSrc, 'FALLBACK_URL');
+  const portConst = (srvSrc.match(/DEFAULT_PORT\s*=\s*(\d+)/) || [])[1] || '';
+
+  check('壳钉的是回环上的测试页 http://127.0.0.1:4173/pay-test/',
+    loadedUrl === 'http://127.0.0.1:' + portConst + '/pay-test/', loadedUrl + ' / DEFAULT_PORT=' + portConst);
+  check('端口跟 DataShareServer.DEFAULT_PORT 一致（改了端口地址就白屏，这条挡着）',
+    portConst === '4173', portConst);
+  check('退路是线上根路径（局域网服务没开时不至于开局白屏）',
+    fallbackUrl === 'https://totooicu.github.io/DatingRecord/', fallbackUrl);
+  check('域名锁只额外放行 127.0.0.1（不是放开任意 host）',
+    /ALLOWED_HOST\.equals\(host\)\s*\|\|\s*"127\.0\.0\.1"\.equals\(host\)/.test(actSrc));
+  check('导航锁与壳自己的 loadUrl 都走同一颗 isAllowedHost（漏一处就加载不了）',
+    (actSrc.match(/isAllowedHost\(/g) || []).length === 3,
+    String((actSrc.match(/isAllowedHost\(/g) || []).length));
 
   // ---- 汇总 ----
   console.log('\n========== 汇总 ==========');
