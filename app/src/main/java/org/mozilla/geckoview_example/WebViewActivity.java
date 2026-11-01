@@ -23,6 +23,7 @@ import android.webkit.GeolocationPermissions;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -55,12 +56,39 @@ import java.util.Map;
 public class WebViewActivity extends AppCompatActivity {
   private static final String LOGTAG = "WebViewActivity";
 
-  /** 壳固定加载的网页根路径（跟随网页仓库 main 最新部署）。 */
+  /**
+   * 测试线专用：钉死加载「一次性服务购买」那份产物，而且**从壳自己那台局域网服务上加载**。
+   *
+   * 为什么不走 https 那条：收费的 /__pay/* 就在本机回环上，而浏览器现在把「公网 https 源 →
+   * 本机回环」当敏感访问拦掉（实测 Chromium 直接 `Permission was denied for this request to
+   * access the loopback address`，给预检补 Access-Control-Allow-Private-Network 也不够）。
+   * 页面改成由壳自己的服务反代出来、与 /__pay/* 同源，这条路实测通：39 项跨仓回归打在
+   * `http://127.0.0.1:<端口>/pay-test/` 上全绿。
+   *
+   * 代价要说清：这条地址要求「跨设备操作」那台服务**已经在跑**，端口就是它那个（默认 4173）。
+   * 服务没开时这一跳必然连接失败，所以退到 FALLBACK_URL——不然壳开局白屏，人连「把服务打开」
+   * 那颗按钮都够不着。退回之后先在网页里开启服务，再重进壳，才回到测试线。
+   *
+   * **这两个常量都不许合进 main**：main 的壳加载站点根路径、跟随网页最新部署，网页修 bug
+   * 不必再发壳；这条线反过来，支付入口只活在网页的 test/payment-recharge 上。
+   */
   public static final String DEFAULT_URL =
+      "http://127.0.0.1:4173/pay-test/";
+
+  /** 回环上没服务时的退路：线上根路径那份（跟随网页 main 部署），至少能进去把服务开起来。 */
+  public static final String FALLBACK_URL =
       "https://totooicu.github.io/DatingRecord/";
 
   /** Only this host may be loaded; any other link is blocked (no external nav). */
   public static final String ALLOWED_HOST = "totooicu.github.io";
+
+  /**
+   * 域名锁：测试线额外放行回环，因为 DEFAULT_URL 就指在 127.0.0.1 上。
+   * 只认这一个字面量，不认任意 host，也不认 `localhost`（怕有人拿它绕 IPv6/解析的花样）。
+   */
+  private static boolean isAllowedHost(String host) {
+    return ALLOWED_HOST.equals(host) || "127.0.0.1".equals(host);
+  }
 
   /**
    * 调试页入口：`adb shell am start -n org.mozilla.geckoview_example/.WebViewActivity
@@ -97,6 +125,8 @@ public class WebViewActivity extends AppCompatActivity {
 
   /** True once the current page finished loading (bridge handoff is safe). */
   private boolean mPageReady = false;
+  /** 测试线：回环加载失败时只退回线上一次，别每次失败都退（否则服务重启的间隙会来回跳）。 */
+  private boolean mFellBack = false;
   /** True while waiting for the page to answer a forwarded back press. */
   private boolean mBackWaitActive = false;
   /** How long the page may answer a forwarded back press before the shell falls back. */
@@ -176,6 +206,27 @@ public class WebViewActivity extends AppCompatActivity {
           }
 
           @Override
+          public void onReceivedError(
+              WebView view, WebResourceRequest request, WebResourceError error) {
+            super.onReceivedError(view, request, error);
+            // 只管主文档那一跳：测试线的默认地址在回环上，局域网服务没开就是连接失败。
+            // 这时退回线上根路径，人至少进得去，也才够得着「开启服务」那颗按钮。
+            if (request != null && request.isForMainFrame() && !mFellBack) {
+              String failed = request.getUrl() != null ? request.getUrl().toString() : "";
+              if (DEFAULT_URL.equals(failed)) {
+                mFellBack = true;
+                Log.w(LOGTAG, "回环上的测试页加载失败，退回线上根路径：" + failed);
+                Toast.makeText(
+                        view.getContext(),
+                        "壳的局域网服务没开，已改用线上页面；开启后重进壳即为测试线",
+                        Toast.LENGTH_LONG)
+                    .show();
+                loadUrl(FALLBACK_URL);
+              }
+            }
+          }
+
+          @Override
           public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
             // Lock navigation to our own host: only totooicu.github.io may load,
             // everything else (external links, other schemes) is blocked.
@@ -189,7 +240,7 @@ public class WebViewActivity extends AppCompatActivity {
             }
 
             String host = u != null ? u.getHost() : null;
-            if (host != null && ALLOWED_HOST.equals(host)) {
+            if (host != null && isAllowedHost(host)) {
               return false; // allow in-site navigation
             }
             if (isDebugAsset(u)) {
@@ -394,7 +445,7 @@ public class WebViewActivity extends AppCompatActivity {
   private void loadUrl(String url) {
     Uri u = Uri.parse(url);
     String host = u.getHost();
-    if (host == null || !ALLOWED_HOST.equals(host)) {
+    if (host == null || !isAllowedHost(host)) {
       Log.w(LOGTAG, "loadUrl blocked (outside allowed host): " + url);
       return;
     }

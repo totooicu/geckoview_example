@@ -443,12 +443,17 @@ public final class DataShareServer {
     String path = url.path;
 
     // OPTIONS 预检：/__pay/* 全组支持跨域
+    // Access-Control-Allow-Private-Network：线上页面是 https 公网源，要去打本机 127.0.0.1
+    // 的回环服务，浏览器（Chromium 的 loopback / Local Network Access 策略）会先发一个带
+    // Access-Control-Request-Private-Network 的预检；不回填这条头就直接 "Permission was denied
+    // for this request to access the loopback address"，看着像连不上服务器。
     if ("OPTIONS".equals(method)) {
       out.write(
           ("HTTP/1.1 204 No Content\r\n"
               + "Access-Control-Allow-Origin: *\r\n"
               + "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
               + "Access-Control-Allow-Headers: Content-Type\r\n"
+              + "Access-Control-Allow-Private-Network: true\r\n"
               + "Content-Length: 0\r\n"
               + "Connection: close\r\n\r\n").getBytes(UTF8));
       out.flush();
