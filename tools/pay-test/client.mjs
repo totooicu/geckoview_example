@@ -17,6 +17,7 @@
 // 13. 终态不可逆（cancelled/failed/expired 后再 action → 409）
 // 14. refund 从 paid 可走
 // 15. 壳的加载地址钉在回环上的测试线子路径（同源才连得上 /__pay/*），端口与退路都在检查里
+// 16. 取包用的那条 Actions：触发条件、JAVA_HOME 覆盖、产物路径、只读权限、失败落到摘要
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -321,6 +322,31 @@ async function main() {
   check('导航锁与壳自己的 loadUrl 都走同一颗 isAllowedHost（漏一处就加载不了）',
     (actSrc.match(/isAllowedHost\(/g) || []).length === 3,
     String((actSrc.match(/isAllowedHost\(/g) || []).length));
+
+  // ---- 16. 取包那条 CI（源码级）----
+  // 沙箱和手机都没有 Android SDK，Java 改动在这儿编不了，唯一的「编过」证据是 Actions
+  // 跑出的 debug 包。那条 workflow 一旦被人改坏（漏了 JAVA_HOME 覆盖、把产物路径写错、
+  // 或者悄悄挪去发版），手机上只会看到「跑挂了」这种没信息量的红叉，所以把它的关键约束
+  // 钉在这里：改坏了本地就红，不用等 CI 猜。
+  console.log('\n== 取包 CI ==');
+  const wfPath = path.join(here, '..', '..', '.github/workflows/apk.yml');
+  const wfExists = fs.existsSync(wfPath);
+  check('取包工作流文件在（.github/workflows/apk.yml）', wfExists, wfPath);
+  const wf = wfExists ? fs.readFileSync(wfPath, 'utf8') : '';
+  check('推测试分支会触发，也留了手动触发',
+    /branches:\s*\[[^\]]*'test\/\*\*'/.test(wf) && /workflow_dispatch/.test(wf));
+  check('gradle.properties 那行本机 java 路径在命令行被覆盖成 runner 的 JAVA_HOME（不覆盖 Gradle 直接报 invalid）',
+    /-Dorg\.gradle\.java\.home="\$JAVA_HOME"/.test(wf));
+  check('产物路径钉在 app/build/outputs/apk/debug/app-debug.apk',
+    /path:\s*app\/build\/outputs\/apk\/debug\/app-debug\.apk/.test(wf));
+  check('没产出就让这一步失败（免得下到一个空 Artifacts）',
+    /if-no-files-found:\s*error/.test(wf));
+  check('只给读权限——这条不是发布链路，不该能动仓库设置或发版',
+    /permissions:\s*\n\s*contents:\s*read/.test(wf) && !/pages:\s*write|contents:\s*write/.test(wf));
+  check('失败要点落到 run 摘要（沙箱匿名拉不到日志，手机上只能读这段）',
+    /GITHUB_STEP_SUMMARY/.test(wf) && /if:\s*failure\(\)/.test(wf));
+  check('不引用那个第一次把作业跑挂的第三方 setup-android',
+    !/android-actions\/setup-android/.test(wf));
 
   // ---- 汇总 ----
   console.log('\n========== 汇总 ==========');

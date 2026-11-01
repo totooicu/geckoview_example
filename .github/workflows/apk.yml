@@ -40,28 +40,48 @@ jobs:
       # gradle.properties 里有一行 org.gradle.java.home=/home/user/jdk/jdk-17.0.20.1+1，
       # 那是本机的绝对路径，runner 上不存在，Gradle 会直接报「invalid」。不改库里那行
       # （改了会破坏用户本地构建），在命令行用 -D 覆盖成 runner 自己的 JAVA_HOME。
-      - name: 准备 Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 装 SDK 组件（缺件时 AGP 也会自己下，这里只是提前接受许可）
+      #
+      # SDK 不再用第三方 action 装（第一次试就跑挂了，而且它装的版本和这里的
+      # compileSdk 37 未必对得上）：GitHub 的 ubuntu runner 自带 Android SDK 与已接受的
+      # 许可，缺的平台交给 AGP 自己按 compileSdk 解析下载。这一步只负责把现场打印出来，
+      # 装不装得上都不让作业失败——真缺件会在 assembleDebug 的日志里说清楚。
+      - name: Android SDK 现场
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          # compileSdk 是 API 37（含 minor），不同镜像里的包名不完全一致，逐个试；
-          # 装不上不算失败——真正解析由 AGP 完成，失败会在下一步的日志里说清楚。
-          for p in "platforms;android-37" "platforms;android-37.0.2" "build-tools;37.0.0"; do
-            if sdkmanager --install "$p" >/dev/null 2>&1; then
-              echo "已装：$p"
-            else
-              echo "跳过：$p（不存在或已装）"
-            fi
-          done
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME/platforms" 2>/dev/null || echo '(platforms 目录为空)'
+          echo "ANDROID_HOME=${ANDROID_HOME:-<未设置>}"
+          java -version 2>&1 | head -2
+          if command -v sdkmanager >/dev/null 2>&1; then
+            yes | sdkmanager --licenses >/dev/null 2>&1 || true
+            # compileSdk 是 API 37 且带 minor，包名在不同镜像里不一致，逐个试
+            for p in "platforms;android-37" "platforms;android-37.0.2" "build-tools;37.0.0"; do
+              if sdkmanager --install "$p" >/dev/null 2>&1; then echo "已装：$p"; else echo "跳过：$p"; fi
+            done
+            sdkmanager --list_installed 2>/dev/null | tail -15 || true
+          else
+            echo 'runner 里没有 sdkmanager，组件解析全交给 AGP'
+          fi
+          ls "${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms" 2>/dev/null || echo '(platforms 目录为空)'
 
       - name: assembleDebug
         run: |
+          set -o pipefail
           ./gradlew :app:assembleDebug --no-daemon --stacktrace \
-            -Dorg.gradle.java.home="$JAVA_HOME"
+            -Dorg.gradle.java.home="$JAVA_HOME" 2>&1 | tee /tmp/build.log
+
+      - name: 失败要点写进摘要（手机上打开 run 就直接读，不用翻日志）
+        if: failure()
+        run: |
+          {
+            echo '### 这次没编过'
+            echo
+            echo '最相关的几行（完整输出在 debug-apk → assembleDebug 那一步）：'
+            echo '```text'
+            if [ -f /tmp/build.log ]; then
+              grep -nE "FAILURE|What went wrong|Could not|error:|Execution failed|Invalid|invalid" /tmp/build.log | tail -30
+            else
+              echo '没有 build.log——挂在 assembleDebug 之前的某一步，看那一步的日志。'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 取包看这里（版本、commit、构建号写进 run 摘要）
         if: always()
