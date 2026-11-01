@@ -81,6 +81,10 @@ cd tools/pay-test && ./run.sh
 那道门禁现在由 CI 补上：推分支自动跑 `assembleDebug`，产物挂在 Actions 的 Artifacts 上、
 手机浏览器直接下载，取包步骤与边界见 `docs/CI_GUIDE.md`。
 
+> 实测：run `41286281262`（提交 `a713e67`）绿，Artifacts 里 3.4 MB 的 `app-debug.apk`。
+> 这条改动动过的 `WebViewActivity.java`（加载地址、退路、`onReceivedError`、scheme 拦截）**第一次真编过**——
+> 之前它只在沙箱里做过语法探测，从没链接过 Android SDK。
+
 **网页侧跨仓复用启动命令：**
 
 ```bash
